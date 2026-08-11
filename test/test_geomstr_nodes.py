@@ -1,0 +1,18 @@
+import unittest
+
+from madgrav.core.node.elem_polyline import PolylineNode
+from madgrav.core.geomstr import Geomstr
+
+
+class TestGeomstr(unittest.TestCase):
+    """These tests ensure the basic functions of the Geomstr node types"""
+
+    def test_polynode_points(self):
+        node = PolylineNode(Geomstr.lines(0, 0, 1, 1, 2, 2, 3, 3, 4, 4))
+        self.assertEqual(len(node.geometry), 4)
+        node = PolylineNode(0, 0, 1, 1, 2, 2, 3, 3, 4, 4)
+        self.assertEqual(len(node.geometry), 4)
+
+    def test_polynode_revalidate(self):
+        node = PolylineNode(Geomstr.lines(0, 0, 1, 1, 2, 2, 3, 3, 4, 4))
+        node.revalidate_points()
