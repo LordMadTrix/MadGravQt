@@ -505,3 +505,98 @@ def plugin(kernel, lifecycle=None):
             thread.stop = do_shutdown
 
             channel(_("MJPEG-SERVER: Launching"))
+
+        @kernel.console_command(
+            "chessboard_calibrate",
+            help="Capture chessboard shot for optical lens calibration",
+            input_type="camera",
+            output_type="camera",
+        )
+        def camera_chessboard_calibrate(_, channel, data=None, **kwargs):
+            if data is None:
+                return
+            ok, rms, count = data.chessboard_capture()
+            if ok:
+                channel(
+                    _("Chessboard calibration updated ({count} images). RMS error: {rms:.4f}").format(
+                        count=count, rms=rms
+                    )
+                )
+            else:
+                channel(_("Chessboard capture failed or pattern not found."))
+            return "camera", data
+
+        @kernel.console_command(
+            "aruco_autocal",
+            help="Detect ArUco markers and auto-calibrate camera homography (pixel -> mm)",
+            input_type="camera",
+            output_type="camera",
+        )
+        def camera_aruco_autocal(_, channel, data=None, **kwargs):
+            if data is None:
+                return
+            try:
+                H, rms_mm, count = data.detect_and_apply_aruco_homography()
+                channel(
+                    _("ArUco homography calibrated ({count} markers). RMS residual: {rms:.3f} mm").format(
+                        count=count, rms=rms_mm
+                    )
+                )
+            except Exception as e:
+                channel(_("ArUco auto-calibration failed: {err}").format(err=str(e)))
+            return "camera", data
+
+        @kernel.console_command(
+            "measure_objects",
+            help="Detect objects in camera view and report dimensions in mm",
+            input_type="camera",
+            output_type="camera",
+        )
+        def camera_measure_objects(_, channel, data=None, **kwargs):
+            if data is None:
+                return
+            try:
+                objects = data.detect_objects_and_measure()
+                channel(_("Detected {count} object(s):").format(count=len(objects)))
+                for i, obj in enumerate(objects, 1):
+                    min_x, min_y, w_mm, h_mm = obj.bounding_box_mm
+                    channel(
+                        f"  #{i}: Size={w_mm:.2f}x{h_mm:.2f}mm, Area={obj.area_mm2:.2f}mm², Pos=({min_x:.1f},{min_y:.1f})mm"
+                    )
+            except Exception as e:
+                channel(_("Object measurement failed: {err}").format(err=str(e)))
+            return "camera", data
+
+        @kernel.console_command(
+            "trace_to_elements",
+            help="Convert camera-detected objects directly into workspace vector path elements",
+            input_type="camera",
+            output_type="camera",
+        )
+        def camera_trace_to_elements(_, channel, data=None, **kwargs):
+            if data is None:
+                return
+            try:
+                from madgrav.camera.cameratrace import trace_camera_frame_to_elements
+                nodes = trace_camera_frame_to_elements(kernel, camera_service=data)
+                channel(_("Converted {count} camera object(s) to vector elements.").format(count=len(nodes)))
+            except Exception as e:
+                channel(_("Camera trace to elements failed: {err}").format(err=str(e)))
+            return "camera", data
+
+        @kernel.console_command(
+            "frame_object",
+            help="Perform red-dot laser framing around detected camera object",
+            input_type="camera",
+            output_type="camera",
+        )
+        def camera_frame_object(_, channel, data=None, **kwargs):
+            if data is None:
+                return
+            try:
+                from madgrav.camera.cameratrace import frame_camera_object
+                frame_camera_object(kernel, camera_service=data)
+                channel(_("Laser framing started for detected object."))
+            except Exception as e:
+                channel(_("Camera object framing failed: {err}").format(err=str(e)))
+            return "camera", data

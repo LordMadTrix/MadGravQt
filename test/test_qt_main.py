@@ -17,6 +17,7 @@ try:
     from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QColorDialog,
         QDialog,
         QDoubleSpinBox,
@@ -1277,6 +1278,54 @@ class TestQtMainWindow(unittest.TestCase):
         self.assertAlmostEqual(actual_w, expected_w, delta=1.0)
         self.assertAlmostEqual(actual_h, expected_h, delta=1.0)
 
+    def test_rect_corner_radius_spinbox_rounds_the_next_drawn_rectangle(self):
+        # LightBurn's Rectangle tool has a corner-radius field in its
+        # options bar; "rect" (madgrav/core/elements/shapes.py) already
+        # supports rounded corners via its -x/-y options, just never
+        # wired to this tool's actual drag gesture before. The spinbox
+        # (qt_main.py) writes straight into MadGravQtCanvas.
+        # rect_corner_radius_mm, read by _finish_draw() at the moment a
+        # drag completes -- default 0 must stay sharp-cornered (no
+        # regression for every rectangle drawn before this feature).
+        canvas = self.win.canvas
+        elements = self.root.elements
+
+        self.assertEqual(canvas.rect_corner_radius_mm, 0.0)
+
+        canvas.set_draw_mode("rect")
+        QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
+        QTest.mouseMove(canvas.viewport(), pos=QPoint(160, 140))
+        QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(160, 140))
+        self.app.processEvents()
+        sharp_node = list(elements.elems())[-1]
+        self.assertEqual(sharp_node.rx, 0)
+        self.assertEqual(sharp_node.ry, 0)
+
+        self.win.rect_corner_radius_spin.setValue(3.5)
+        self.assertEqual(canvas.rect_corner_radius_mm, 3.5)
+
+        canvas.set_draw_mode("rect")
+        QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
+        QTest.mouseMove(canvas.viewport(), pos=QPoint(160, 140))
+        QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(160, 140))
+        self.app.processEvents()
+        rounded_node = list(elements.elems())[-1]
+        from madgrav.core.units import UNITS_PER_MM
+
+        self.assertAlmostEqual(rounded_node.rx / UNITS_PER_MM, 3.5, delta=0.01)
+        self.assertAlmostEqual(rounded_node.ry / UNITS_PER_MM, 3.5, delta=0.01)
+
+        # Resetting to 0 must not leave rounding stuck on for later draws.
+        self.win.rect_corner_radius_spin.setValue(0.0)
+        canvas.set_draw_mode("rect")
+        QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
+        QTest.mouseMove(canvas.viewport(), pos=QPoint(160, 140))
+        QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(160, 140))
+        self.app.processEvents()
+        reset_node = list(elements.elems())[-1]
+        self.assertEqual(reset_node.rx, 0)
+        self.assertEqual(reset_node.ry, 0)
+
     def test_canvas_ellipse_and_line_drag_create_matching_elements(self):
         # Rectangle's drag pipeline is covered above -- Ellipse and Line
         # take genuinely different branches in _finish_draw() (ellipse
@@ -1376,6 +1425,75 @@ class TestQtMainWindow(unittest.TestCase):
         newest = list(elements.elems())[-1]
         self.assertEqual(newest.text, "He said 'hi'")
 
+    def test_canvas_polygon_tool_click_prompts_and_places_element(self):
+        # Same single-click-then-dialog shape as the Text tool above --
+        # a regular polygon/star has no natural two-corner drag (it would
+        # only fix one dimension, not sides-count or star-vs-regular), so
+        # a QDialog (not QInputDialog, since it needs 3 fields) follows
+        # the click instead. "polygon" (madgrav/core/elements/shapes.py)
+        # creates an "elem polyline" node from an explicit point list --
+        # this confirms the vertex COUNT matches sides (or sides*2 for a
+        # star), a cancelled dialog is a no-op that leaves the tool
+        # active, and clicking with no selection doesn't just no-op the
+        # whole thing (unlike most Edit-menu actions, this tool creates
+        # NEW content, it never needs an existing selection).
+        canvas = self.win.canvas
+        elements = self.root.elements
+        count_before = len(list(elements.elems()))
+
+        canvas.set_draw_mode("polygon")
+
+        def fake_exec_hexagon(dlg_self):
+            dlg_self.findChildren(QSpinBox)[0].setValue(6)
+            dlg_self.findChildren(QDoubleSpinBox)[0].setValue(10.0)
+            return QDialog.DialogCode.Accepted
+
+        with patch.object(QDialog, "exec", fake_exec_hexagon):
+            QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
+            self.app.processEvents()
+            self.kernel.process_queue()
+
+        self.assertEqual(len(list(elements.elems())), count_before + 1)
+        new_node = list(elements.elems())[-1]
+        self.assertEqual(new_node.type, "elem polyline")
+        # PolylineNode.shape (madgrav/core/node/elem_polyline.py) rebuilds
+        # from self.geometry.as_points(), not the original point list --
+        # a closed shape's geometry carries an explicit closing segment
+        # back to the first vertex, so a real N-sided polygon reads back
+        # as N+1 points (last == first). Confirmed here rather than just
+        # asserted, since it's not obvious from the console command alone.
+        shape_points = list(new_node.shape)
+        self.assertEqual(len(shape_points), 7)
+        self.assertAlmostEqual(shape_points[0].x, shape_points[-1].x, places=6)
+        self.assertAlmostEqual(shape_points[0].y, shape_points[-1].y, places=6)
+        self.assertIsNone(canvas.draw_mode)  # reverts to Select, like other tools
+
+        canvas.set_draw_mode("polygon")
+
+        def fake_exec_star(dlg_self):
+            dlg_self.findChildren(QSpinBox)[0].setValue(5)
+            dlg_self.findChildren(QDoubleSpinBox)[0].setValue(8.0)
+            dlg_self.findChildren(QCheckBox)[0].setChecked(True)
+            return QDialog.DialogCode.Accepted
+
+        with patch.object(QDialog, "exec", fake_exec_star):
+            QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+            self.app.processEvents()
+            self.kernel.process_queue()
+
+        star_node = list(elements.elems())[-1]
+        # 5 branches -> 10 vertices, +1 duplicated closing point (see above).
+        self.assertEqual(len(list(star_node.shape)), 11)
+
+        # A cancelled dialog is a no-op that leaves the tool active.
+        canvas.set_draw_mode("polygon")
+        count_before3 = len(list(elements.elems()))
+        with patch.object(QDialog, "exec", lambda dlg_self: QDialog.DialogCode.Rejected):
+            QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(60, 60))
+            self.app.processEvents()
+        self.assertEqual(len(list(elements.elems())), count_before3)
+        self.assertEqual(canvas.draw_mode, "polygon")
+
     def test_drawing_a_shape_auto_reverts_to_the_select_tool(self):
         # Draw tools are one-shot (_on_shape_created, wired to the
         # canvas's shape_created signal): matches most vector editors'
@@ -1401,6 +1519,125 @@ class TestQtMainWindow(unittest.TestCase):
         self.assertIsNone(canvas.draw_mode)
         self.assertTrue(select_btn.isChecked())
         self.assertFalse(rect_btn.isChecked())
+
+    # -- Resize/rotate selection handles -------------------------------------
+
+    def test_selection_handles_appear_only_for_a_single_selection(self):
+        elements = self.root.elements
+        canvas = self.win.canvas
+
+        # No selection -> no handles.
+        canvas._update_selection_handles()
+        self.assertEqual(canvas._handle_items, {})
+
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        canvas.render_elements()
+        node_a = list(elements.elems())[-1]
+        elements.set_emphasis([node_a])
+        canvas.refresh_selection_highlight()
+        # 8 resize handles + the rotate handle + its connecting line.
+        self.assertEqual(len(canvas._handle_items), 10)
+
+        self.root("rect 20mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        canvas.render_elements()
+        node_b = list(elements.elems())[-1]
+        elements.set_emphasis([node_a, node_b])
+        canvas.refresh_selection_highlight()
+        self.assertEqual(
+            canvas._handle_items, {}, "multi-selection must not show handles"
+        )
+
+    def test_dragging_a_corner_handle_resizes_the_element(self):
+        from madgrav.core.units import UNITS_PER_MM
+
+        elements = self.root.elements
+        canvas = self.win.canvas
+
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        canvas.render_elements()
+        node = list(elements.elems())[-1]
+        elements.set_emphasis([node])
+        canvas.refresh_selection_highlight()
+
+        se_handle = canvas._handle_items["se"]
+        start_pos = canvas.mapFromScene(se_handle.pos())
+
+        canvas._start_handle_drag("se", start_pos)
+        self.assertEqual(canvas._active_handle, "se")
+
+        # Drag the SE corner out to (20mm, 20mm) -- doubles the shape to
+        # 20x20mm, anchored at its unmoved NW corner (0, 0).
+        end_pos = canvas.mapFromScene(QPointF(20.0, 20.0))
+        canvas._update_handle_drag(end_pos)
+        canvas._finish_handle_drag(end_pos)
+        self.kernel.process_queue()
+
+        self.assertIsNone(canvas._active_handle)
+        # "resize" applies a matrix scale rather than rewriting the
+        # node's raw width/height attributes (those stay the pre-
+        # transform local shape size) -- .bounds is the real, effective
+        # (transformed) bounding box, same as every other geometry
+        # assertion this session (QR code / gear / jigsaw generators).
+        # delta=2.0: the drag position round-trips through
+        # mapFromScene()/mapToScene() (pixel <-> mm), which loses
+        # sub-pixel precision at whatever zoom level the test window
+        # happens to be at -- a real user drag has the exact same
+        # rounding, so this is expected imprecision, not a bug (the
+        # resize command itself, confirmed via the "resize -1.0mm
+        # -1.0mm 21.09mm 21.09mm" console echo, applies exactly what
+        # it's given).
+        min_x, min_y, max_x, max_y = node.bounds
+        self.assertAlmostEqual((max_x - min_x) / UNITS_PER_MM, 20.0, delta=2.0)
+        self.assertAlmostEqual((max_y - min_y) / UNITS_PER_MM, 20.0, delta=2.0)
+        self.assertAlmostEqual(min_x / UNITS_PER_MM, 0.0, delta=2.0)
+        self.assertAlmostEqual(min_y / UNITS_PER_MM, 0.0, delta=2.0)
+
+    def test_dragging_the_rotate_handle_rotates_the_element(self):
+        elements = self.root.elements
+        canvas = self.win.canvas
+
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        canvas.render_elements()
+        node = list(elements.elems())[-1]
+        elements.set_emphasis([node])
+        canvas.refresh_selection_highlight()
+
+        before_rotation = node.matrix.rotation
+
+        rotate_handle = canvas._handle_items["rotate"]
+        start_pos = canvas.mapFromScene(rotate_handle.pos())
+        canvas._start_handle_drag("rotate", start_pos)
+        self.assertEqual(canvas._active_handle, "rotate")
+
+        # The rotate handle starts due north of the shape's center; drag
+        # it due east instead -- a clean, unambiguous ~90 degree turn.
+        center = canvas._handle_drag_center
+        east_scene = QPointF(center.x() + 20.0, center.y())
+        end_pos = canvas.mapFromScene(east_scene)
+        canvas._update_handle_drag(end_pos)
+        canvas._finish_handle_drag(end_pos)
+        self.kernel.process_queue()
+
+        self.assertIsNone(canvas._active_handle)
+        after_rotation = node.matrix.rotation
+        self.assertNotAlmostEqual(float(after_rotation), float(before_rotation), delta=0.01)
+
+        # A cancelled/negligible drag (release ~where it started) must
+        # not rotate anything.
+        elements.set_emphasis([node])
+        canvas.refresh_selection_highlight()
+        rotate_handle = canvas._handle_items["rotate"]
+        start_pos = canvas.mapFromScene(rotate_handle.pos())
+        canvas._start_handle_drag("rotate", start_pos)
+        rotation_before_noop = node.matrix.rotation
+        canvas._finish_handle_drag(start_pos)
+        self.assertAlmostEqual(
+            float(node.matrix.rotation), float(rotation_before_noop), delta=0.01
+        )
 
     # -- Light/Dark theme toggle -------------------------------------------
 
@@ -1723,11 +1960,9 @@ class TestQtMainWindow(unittest.TestCase):
 
         def pos_for(node):
             item = next(it for it, n in canvas._item_to_node.items() if n is node)
-            return canvas.mapFromScene(item.sceneBoundingRect().center())
+            return canvas.viewport().mapFromGlobal(canvas.mapToGlobal(canvas.mapFromScene(item.sceneBoundingRect().center())))
 
-        pos_a, pos_b = pos_for(node_a), pos_for(node_b)
-
-        QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=pos_a)
+        QTest.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=pos_for(node_a))
         self.app.processEvents()
         self.assertEqual(set(elements.elems(emphasized=True)), {node_a})
 
@@ -1735,7 +1970,7 @@ class TestQtMainWindow(unittest.TestCase):
             canvas.viewport(),
             Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.ShiftModifier,
-            pos=pos_b,
+            pos=pos_for(node_b),
         )
         self.app.processEvents()
         self.assertEqual(set(elements.elems(emphasized=True)), {node_a, node_b})
@@ -1745,7 +1980,7 @@ class TestQtMainWindow(unittest.TestCase):
             canvas.viewport(),
             Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.ShiftModifier,
-            pos=pos_a,
+            pos=pos_for(node_a),
         )
         self.app.processEvents()
         self.assertEqual(set(elements.elems(emphasized=True)), {node_b})
@@ -2325,6 +2560,69 @@ class TestQtMainWindow(unittest.TestCase):
         elements.set_emphasis(None)
         self.kernel.process_queue()
         self.win._on_declassify_selection()
+
+    # -- Z-order (bring to front / send to back) --------------------------
+
+    def test_bring_to_front_and_send_to_back_reorder_siblings(self):
+        # The document's own child order among siblings already IS the
+        # canvas paint order (render_elements() adds scene items in
+        # elem_branch.flat() order, and non-emphasized items share one
+        # Z-value) -- this confirms the actual sibling list order
+        # changes, which is what drives the real visual stacking, not
+        # just that the action runs without crashing.
+        elements = self.root.elements
+        node_a = elements.elem_branch.add(
+            type="elem rect", x=0, y=0, width="5mm", height="5mm",
+            stroke=elements.default_stroke,
+        )
+        node_b = elements.elem_branch.add(
+            type="elem rect", x=10, y=0, width="5mm", height="5mm",
+            stroke=elements.default_stroke,
+        )
+        node_c = elements.elem_branch.add(
+            type="elem rect", x=20, y=0, width="5mm", height="5mm",
+            stroke=elements.default_stroke,
+        )
+        self.kernel.process_queue()
+        siblings = elements.elem_branch.children
+        self.assertEqual(
+            [n for n in siblings if n in (node_a, node_b, node_c)],
+            [node_a, node_b, node_c],
+        )
+
+        # Bring the FIRST node to front -> it must now be LAST.
+        elements.set_emphasis([node_a])
+        self.win._on_bring_to_front()
+        self.kernel.process_queue()
+        siblings = elements.elem_branch.children
+        self.assertEqual(
+            [n for n in siblings if n in (node_a, node_b, node_c)],
+            [node_b, node_c, node_a],
+        )
+
+        # Send that same node back to the back -> it must now be FIRST.
+        elements.set_emphasis([node_a])
+        self.win._on_send_to_back()
+        self.kernel.process_queue()
+        siblings = elements.elem_branch.children
+        self.assertEqual(
+            [n for n in siblings if n in (node_a, node_b, node_c)],
+            [node_a, node_b, node_c],
+        )
+
+        # Already at the front/back -- a safe no-op, not a crash.
+        elements.set_emphasis([node_a])
+        self.win._on_send_to_back()
+        siblings = elements.elem_branch.children
+        self.assertEqual(
+            [n for n in siblings if n in (node_a, node_b, node_c)],
+            [node_a, node_b, node_c],
+        )
+
+        # No selection -- a safe no-op.
+        elements.set_emphasis(None)
+        self.win._on_bring_to_front()
+        self.win._on_send_to_back()
 
     # -- Load file over an already-rendered document ---------------------
 
@@ -3645,6 +3943,81 @@ class TestQtMainWindow(unittest.TestCase):
         child_item = find_op_item().child(0)
         self.win._on_tree_item_double_clicked(child_item, 3)
 
+    def test_time_estimate_label_sums_enabled_ops_and_skips_disabled_ones(self):
+        # LightBurn shows an "Estimated Time" readout prominently near
+        # its operations list; every op_*.py node class already computes
+        # its own time_estimate() ("H:MM:SS" string) but nothing summed
+        # them into a whole-job total before. A disabled operation
+        # (output=False) must not count -- it won't actually fire in a
+        # real job, so including it would make the total misleading
+        # rather than just incomplete.
+        elements = self.root.elements
+        from madgrav.core.units import UNITS_PER_MM
+
+        def hms_to_seconds(text):
+            h, m, s = text.split(":")
+            return int(h) * 3600 + int(m) * 60 + int(s)
+
+        # elem_branch.add() directly (not the "rect" console command) --
+        # bypasses classify_new's auto-classification into whatever
+        # default operation already exists, so each rect below ends up
+        # ONLY in the operation this test explicitly references it into.
+        # x/y/width/height are raw native-unit floats here, not "Nmm"
+        # strings -- unlike the "rect" console command (which parses
+        # Length strings itself before calling elem_branch.add()), the
+        # node constructor does no such parsing and does real arithmetic
+        # on these at as_geometry() time (x + width, etc).
+        rect_a = elements.elem_branch.add(
+            type="elem rect",
+            x=0.0,
+            y=0.0,
+            width=10 * UNITS_PER_MM,
+            height=10 * UNITS_PER_MM,
+        )
+        op_enabled = elements.op_branch.add(type="op engrave", label="EnabledOp")
+        # Deliberately slow: a small square's perimeter at a normal
+        # engrave speed (e.g. 100mm/s) can round down to "0:00:00" once
+        # time_estimate() truncates to whole seconds -- a slow speed
+        # keeps its own contribution a comfortably non-zero, measurable
+        # delta below.
+        op_enabled.speed = 1.0
+        op_enabled.output = True
+        op_enabled.add_reference(rect_a)
+        self.win._refresh_operations_tree()
+
+        # Baseline BEFORE adding the disabled op -- compares deltas
+        # rather than an absolute total, so this stays correct even if
+        # setUp() or a sibling op ever contributes its own baseline time.
+        def shown_seconds():
+            text = self.win.time_estimate_lbl.text()
+            self.assertTrue(text.startswith("Temps estimé : "))
+            return hms_to_seconds(text.split(": ", 1)[1])
+
+        baseline_seconds = shown_seconds()
+
+        rect_b = elements.elem_branch.add(
+            type="elem rect",
+            x=20 * UNITS_PER_MM,
+            y=0.0,
+            width=10 * UNITS_PER_MM,
+            height=10 * UNITS_PER_MM,
+        )
+        op_disabled = elements.op_branch.add(type="op engrave", label="DisabledOp")
+        op_disabled.speed = 1.0
+        op_disabled.output = False
+        op_disabled.add_reference(rect_b)
+        self.win._refresh_operations_tree()
+
+        # A disabled op must not move the total at all.
+        self.assertEqual(shown_seconds(), baseline_seconds)
+
+        # Re-enabling it must add exactly its own contribution.
+        op_disabled.output = True
+        self.win._refresh_operations_tree()
+        disabled_op_seconds = hms_to_seconds(op_disabled.time_estimate())
+        self.assertGreater(disabled_op_seconds, 0)  # sanity: a real, non-zero cut path
+        self.assertEqual(shown_seconds(), baseline_seconds + disabled_op_seconds)
+
     def test_tree_duplicate_and_delete_buttons(self):
         # Regression test for a real bug found via this test: the
         # buttons originally read QTreeWidget.currentItem()/
@@ -3942,13 +4315,14 @@ class TestQtMainWindow(unittest.TestCase):
         # and also checks the QButtonGroup's exclusivity (only the
         # clicked tool stays checked).
         buttons = self.win.tool_group.buttons()
-        self.assertEqual(len(buttons), 6)
+        self.assertEqual(len(buttons), 7)
         expected_modes = {
             "Sélection": None,
             "Rectangle": "rect",
             "Cercle": "ellipse",
             "Ligne": "line",
             "Texte": "text",
+            "Polygone": "polygon",
         }
         checked_texts = {b.text() for b in buttons}
         self.assertTrue(set(expected_modes).issubset(checked_texts))
@@ -3977,7 +4351,7 @@ class TestQtMainWindow(unittest.TestCase):
         # theme toggle, same as _apply_toolbar_button_theme() already is
         # for the arm/start/pause/stop/coolant buttons.
         buttons = self.win.tool_group.buttons()
-        self.assertEqual(len(buttons), 6)
+        self.assertEqual(len(buttons), 7)
         for btn in buttons:
             self.assertFalse(btn.icon().isNull(), btn.text())
 
@@ -3989,18 +4363,23 @@ class TestQtMainWindow(unittest.TestCase):
     # -- Retractable right-side panels ---------------------------------------
 
     def test_right_docks_are_retractable_and_reopenable_via_panels_menu(self):
-        # Each right-side QDockWidget already had Qt's default
-        # DockWidgetClosable feature (no setFeatures() call anywhere
-        # restricts it) -- clicking a panel's own title-bar "X" already
-        # retracted/hid it. The only missing half was a way to bring it
-        # back: dock.toggleViewAction() surfaced in a new "Panneaux"
-        # submenu of Affichage, a checkable QAction that both triggers
-        # and reflects the dock's actual visibility.
-        for dock in (self.win.dock_ops, self.win.dock_pos, self.win.dock_laser):
-            self.assertTrue(dock.isVisible())
+        # Every dock (tool palette, inspector, console) now starts
+        # hidden -- each stays one click away via Affichage > Panneaux
+        # instead of occupying screen space unasked. Each QDockWidget
+        # already has Qt's default DockWidgetClosable feature (no
+        # setFeatures() call anywhere restricts it) -- clicking a
+        # panel's own title-bar "X" retracts/hides it once shown; the
+        # matching re-show half is dock.toggleViewAction(), a checkable
+        # QAction that both triggers and reflects the dock's actual
+        # visibility, surfaced in the "Panneaux" submenu of Affichage.
+        for dock in (self.win.dock_tools, self.win.dock_ops, self.win.dock_console):
+            self.assertFalse(dock.isVisible(), f"{dock.windowTitle()} should start hidden")
 
         action = self.win.dock_ops.toggleViewAction()
-        self.assertTrue(action.isChecked())
+        self.assertFalse(action.isChecked())
+
+        action.trigger()
+        self.assertTrue(self.win.dock_ops.isVisible())
 
         self.win.dock_ops.close()
         self.assertFalse(self.win.dock_ops.isVisible())
@@ -4018,7 +4397,7 @@ class TestQtMainWindow(unittest.TestCase):
         entry_texts = {a.text() for a in panels_menu.actions()}
         self.assertEqual(
             entry_texts,
-            {"Arbre des Opérations", "Position et Taille", "Contrôle Laser & Spooler"},
+            {"Outils Laser & Dessin", "Inspecteur & Contrôle", "Console de Commandes"},
         )
 
     # -- Keyboard shortcuts dialog -------------------------------------------

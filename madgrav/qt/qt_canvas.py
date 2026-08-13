@@ -3,10 +3,13 @@ Interactive QGraphicsView Canvas for MadGrav PyQt6 GUI.
 Renders laser bed grid, laser origin, vector nodes, and interactive element selection.
 """
 
-from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt, pyqtSignal
+import math
+
+from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QGraphicsEllipseItem,
+    QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -35,11 +38,18 @@ class MadGravQtCanvas(QGraphicsView):
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
 
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
+        self.setOptimizationFlags(QGraphicsView.OptimizationFlag.DontSavePainterState)
+
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing
             | QPainter.RenderHint.SmoothPixmapTransform
             | QPainter.RenderHint.TextAntialiasing
         )
+
+        self._aa_timer = QTimer(self)
+        self._aa_timer.setSingleShot(True)
+        self._aa_timer.timeout.connect(self._restore_antialiasing)
 
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -73,6 +83,12 @@ class MadGravQtCanvas(QGraphicsView):
         self.draw_mode = None  # None | "rect" | "ellipse" | "line" | "text"
         self._draw_start = None
         self._draw_preview = None
+        # LightBurn's Rectangle tool has a corner-radius field in its
+        # options bar; the "rect" console command already supports it
+        # (-x/-y rounded rx/ry), just never wired to this tool before.
+        # Set from the tool panel's spinbox (qt_main.py); 0 = sharp
+        # corners, matching every rectangle drawn before this feature.
+        self.rect_corner_radius_mm = 0.0
 
         # Rubber-band multi-selection state (Selection tool, drag on
         # empty space).
@@ -85,6 +101,24 @@ class MadGravQtCanvas(QGraphicsView):
         self._move_start_scene = None
         self._move_last_scene = None
         self._move_active = False
+
+        # Interactive resize/rotate handles -- shown only for a clean
+        # single selection (see _update_selection_handles): 8 small
+        # squares at the corners/edge-midpoints for resize, plus one
+        # small circle above top-center for free rotation, matching the
+        # standard vector-editor convention (LightBurn/Illustrator/
+        # Inkscape all use this exact layout). Resize/rotate only show a
+        # preview during the drag (dashed rect / live angle) and commit
+        # via the existing "resize"/"rotate" console commands on
+        # release -- same "preview during drag, commit once" shape as
+        # the move-drag above, not a live per-pixel geometry rebuild.
+        self._handle_items = {}
+        self._active_handle = None
+        self._handle_drag_start_rect = None
+        self._handle_drag_center = None
+        self._handle_drag_start_angle = None
+        self._handle_preview_item = None
+        self._handle_rotation_live = 0.0
 
         self.init_scene()
         self.render_elements()
@@ -111,14 +145,24 @@ class MadGravQtCanvas(QGraphicsView):
         # crashing with "wrapped C/C++ object ... has been deleted".
         self._element_items = []
         self._item_to_node = {}
+        # Same reasoning as above -- the resize/rotate handle items
+        # (added later this session) are just as dead at the C++ level
+        # after scene.clear(); confirmed by reproduction via
+        # test_device_switch_bed_measurement_feeds_outside_bed_safety_check
+        # (a device switch mid-selection triggers init_scene() then
+        # render_elements(), which used to try removing already-deleted
+        # handle items).
+        self._handle_items = {}
+        self._active_handle = None
+        self._handle_preview_item = None
         self.scene.setBackgroundBrush(QBrush(self.bg_color))
 
-        # Add Bed rectangle
+        # Add Bed rectangle (transparent so it doesn't cover drawBackground's grid & watermark)
         bed_rect = QRectF(0, 0, self.bed_width, self.bed_height)
         self.bed_item = self.scene.addRect(
             bed_rect,
-            QPen(self.border_color, 1.5, Qt.PenStyle.SolidLine),
-            QBrush(self.bed_color),
+            QPen(Qt.PenStyle.NoPen),
+            QBrush(Qt.BrushStyle.NoBrush),
         )
 
         # Origin indicator
@@ -128,6 +172,20 @@ class MadGravQtCanvas(QGraphicsView):
         self.scene.addLine(0, -5, 0, 15, origin_pen_y)
 
         self.setSceneRect(-50, -50, self.bed_width + 100, self.bed_height + 100)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_initial_fitted", False):
+            self._initial_fitted = True
+            QTimer.singleShot(50, self.fit_bed)
+
+    def fit_bed(self):
+        """Center and fit the laser bed inside the viewport."""
+        padding = 15.0
+        self.fitInView(
+            QRectF(-padding, -padding, self.bed_width + 2 * padding, self.bed_height + 2 * padding),
+            Qt.AspectRatioMode.KeepAspectRatio,
+        )
 
     def set_theme(self, dark: bool):
         """Swap the bed/grid colors the QSS stylesheet can't reach (this
@@ -246,6 +304,7 @@ class MadGravQtCanvas(QGraphicsView):
             item.setZValue(11 if getattr(node, "emphasized", False) else 10)
             self._element_items.append(item)
             self._item_to_node[item] = node
+        self._update_selection_handles()
 
     def _movable_selected_items(self):
         """Items whose node is both selected and actually movable -- the
@@ -269,6 +328,289 @@ class MadGravQtCanvas(QGraphicsView):
             if getattr(node, "emphasized", False) and node.can_move(lock_allows_move)
         ]
 
+    _RESIZE_HANDLE_NAMES = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
+    _HANDLE_CURSORS = {
+        "nw": Qt.CursorShape.SizeFDiagCursor,
+        "se": Qt.CursorShape.SizeFDiagCursor,
+        "ne": Qt.CursorShape.SizeBDiagCursor,
+        "sw": Qt.CursorShape.SizeBDiagCursor,
+        "n": Qt.CursorShape.SizeVerCursor,
+        "s": Qt.CursorShape.SizeVerCursor,
+        "e": Qt.CursorShape.SizeHorCursor,
+        "w": Qt.CursorShape.SizeHorCursor,
+        "rotate": Qt.CursorShape.CrossCursor,
+    }
+
+    def _clear_selection_handles(self):
+        for item in self._handle_items.values():
+            self.scene.removeItem(item)
+        self._handle_items = {}
+
+    def _update_selection_handles(self):
+        """(Re)build the resize/rotate handles for the current selection.
+        Only shown for a clean single selection -- resizing/rotating a
+        multi-selection's combined bounding box would silently distort
+        each element's own aspect ratio differently, not a single well-
+        defined transform, so multi-select gets no handles (align/CAG
+        tools already cover multi-element operations)."""
+        self._clear_selection_handles()
+        if self._active_handle is not None:
+            # Mid-drag: the handles' own positions are intentionally
+            # static until the drag commits (see _start_handle_drag) --
+            # rebuilding them here would fight the drag.
+            return
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        emphasized = list(elements.elems(emphasized=True))
+        selected_items = self._movable_selected_items()
+        if len(emphasized) != 1 or len(selected_items) != 1:
+            return
+        rect = selected_items[0].sceneBoundingRect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        anchor_points = {
+            "nw": rect.topLeft(),
+            "n": QPointF(rect.center().x(), rect.top()),
+            "ne": rect.topRight(),
+            "e": QPointF(rect.right(), rect.center().y()),
+            "se": rect.bottomRight(),
+            "s": QPointF(rect.center().x(), rect.bottom()),
+            "sw": rect.bottomLeft(),
+            "w": QPointF(rect.left(), rect.center().y()),
+        }
+        for name, pt in anchor_points.items():
+            handle = QGraphicsRectItem(-4, -4, 8, 8)
+            handle.setPos(pt)
+            # ItemIgnoresTransformations keeps the handle a constant
+            # on-screen pixel size regardless of zoom -- only its anchor
+            # POSITION (set above, in scene/mm coordinates) moves with
+            # the shape and view.
+            handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            pen = QPen(QColor("#0A84FF"), 1)
+            pen.setCosmetic(True)
+            handle.setPen(pen)
+            handle.setBrush(QBrush(QColor("#FFFFFF")))
+            handle.setZValue(30)
+            handle.setCursor(self._HANDLE_CURSORS[name])
+            self.scene.addItem(handle)
+            self._handle_items[name] = handle
+
+        # Rotate handle -- a small circle offset above the top-center
+        # handle, connected by a thin line, the same LightBurn/
+        # Illustrator/Inkscape convention for "this one rotates, the
+        # others resize." Both are anchored at the top-center scene
+        # point but drawn with a local (ignoring-transform) pixel offset
+        # so the 24px gap stays constant regardless of zoom, with no
+        # scene-distance/zoom-factor math needed.
+        top_mid = anchor_points["n"]
+        rotate_line = QGraphicsLineItem(0, 0, 0, -24)
+        rotate_line.setPos(top_mid)
+        rotate_line.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        line_pen = QPen(QColor("#0A84FF"), 1)
+        line_pen.setCosmetic(True)
+        rotate_line.setPen(line_pen)
+        rotate_line.setZValue(29)
+        self.scene.addItem(rotate_line)
+        self._handle_items["rotate_line"] = rotate_line
+
+        rotate_handle = QGraphicsEllipseItem(-5, -29, 10, 10)
+        rotate_handle.setPos(top_mid)
+        rotate_handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        rotate_pen = QPen(QColor("#0A84FF"), 1)
+        rotate_pen.setCosmetic(True)
+        rotate_handle.setPen(rotate_pen)
+        rotate_handle.setBrush(QBrush(QColor("#FFFFFF")))
+        rotate_handle.setZValue(30)
+        rotate_handle.setCursor(self._HANDLE_CURSORS["rotate"])
+        self.scene.addItem(rotate_handle)
+        self._handle_items["rotate"] = rotate_handle
+
+    def _handle_at(self, pos):
+        """Which handle (if any) is under a viewport position -- checked
+        before the general item-click logic in mousePressEvent, since
+        handles visually overlap the selected item's own edges."""
+        items_at = self.items(pos)
+        for name, item in self._handle_items.items():
+            if name == "rotate_line":
+                continue
+            if item in items_at:
+                return name
+        return None
+
+    def _start_handle_drag(self, name, pos):
+        selected_items = self._movable_selected_items()
+        if not selected_items:
+            return
+        rect = selected_items[0].sceneBoundingRect()
+        self._active_handle = name
+        self._handle_drag_start_rect = QRectF(rect)
+        self._handle_drag_center = rect.center()
+        if name == "rotate":
+            scene_pos = self.mapToScene(pos)
+            self._handle_drag_start_angle = math.degrees(
+                math.atan2(
+                    scene_pos.y() - self._handle_drag_center.y(),
+                    scene_pos.x() - self._handle_drag_center.x(),
+                )
+            )
+        else:
+            pen = QPen(QColor("#0A84FF"), 0, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            self._handle_preview_item = QGraphicsRectItem(rect)
+            self._handle_preview_item.setPen(pen)
+            self._handle_preview_item.setZValue(28)
+            self.scene.addItem(self._handle_preview_item)
+
+    def _resize_preview_rect(self, pos):
+        rect = QRectF(self._handle_drag_start_rect)
+        scene_pos = self.mapToScene(pos)
+        if "n" in self._active_handle:
+            rect.setTop(scene_pos.y())
+        if "s" in self._active_handle:
+            rect.setBottom(scene_pos.y())
+        if "w" in self._active_handle:
+            rect.setLeft(scene_pos.x())
+        if "e" in self._active_handle:
+            rect.setRight(scene_pos.x())
+        return rect.normalized()
+
+    def _update_handle_drag(self, pos):
+        if self._active_handle is None:
+            return
+        if self._active_handle == "rotate":
+            scene_pos = self.mapToScene(pos)
+            angle_now = math.degrees(
+                math.atan2(
+                    scene_pos.y() - self._handle_drag_center.y(),
+                    scene_pos.x() - self._handle_drag_center.x(),
+                )
+            )
+            delta = angle_now - self._handle_drag_start_angle
+            self.cursor_position_changed.emit(scene_pos.x(), scene_pos.y())
+            self._handle_rotation_live = delta
+            # Live visual rotation of the actual shape during the drag.
+            # QGraphicsItem.setRotation() is an ABSOLUTE angle (not
+            # incremental), so setting it straight to the total delta
+            # each move is correct -- no accumulation needed. This is
+            # purely a Qt-level transform on top of the item's already-
+            # rendered path; the real node data (and the item itself)
+            # only change once, via the "rotate" console command +
+            # render_elements() rebuild on release, same "preview during
+            # drag, commit once" shape as the resize dashed-rect preview.
+            selected_items = self._movable_selected_items()
+            if selected_items:
+                item = selected_items[0]
+                item.setTransformOriginPoint(item.mapFromScene(self._handle_drag_center))
+                item.setRotation(delta)
+            return
+        if self._handle_preview_item is not None:
+            self._handle_preview_item.setRect(self._resize_preview_rect(pos))
+
+    def _cancel_handle_drag(self):
+        if self._handle_preview_item is not None:
+            self.scene.removeItem(self._handle_preview_item)
+        self._handle_preview_item = None
+        if self._active_handle == "rotate":
+            # Snap the live rotation preview back -- nothing was ever
+            # committed to the real node data, only the on-screen item's
+            # own transform was touched.
+            for item in self._movable_selected_items():
+                item.setRotation(0)
+        self._active_handle = None
+        self._handle_drag_start_rect = None
+        self._handle_drag_center = None
+        self._handle_drag_start_angle = None
+        self._update_selection_handles()
+
+    def _finish_handle_drag(self, pos):
+        if self._active_handle is None:
+            return
+        name = self._active_handle
+        if name == "rotate":
+            scene_pos = self.mapToScene(pos)
+            angle_now = math.degrees(
+                math.atan2(
+                    scene_pos.y() - self._handle_drag_center.y(),
+                    scene_pos.x() - self._handle_drag_center.x(),
+                )
+            )
+            delta = angle_now - self._handle_drag_start_angle
+            self._active_handle = None
+            self._handle_drag_start_rect = None
+            self._handle_drag_center = None
+            self._handle_drag_start_angle = None
+            if abs(delta) < 0.5:
+                # Accidental micro-drag (or a plain click on the handle)
+                # -- not a real rotate gesture.
+                self._update_selection_handles()
+                return
+            elements = getattr(self.context, "elements", None)
+            if elements is None:
+                return
+            self.context.console(f"rotate {delta}deg\n")
+            self.render_elements()
+            self.selection_changed.emit(elements.first_emphasized)
+            return
+
+        rect = self._resize_preview_rect(pos)
+        if self._handle_preview_item is not None:
+            self.scene.removeItem(self._handle_preview_item)
+        self._handle_preview_item = None
+        self._active_handle = None
+        self._handle_drag_start_rect = None
+
+        if rect.width() < _MIN_DRAW_SIZE_MM or rect.height() < _MIN_DRAW_SIZE_MM:
+            self._update_selection_handles()
+            return
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        self.context.console(
+            f"resize {rect.x()}mm {rect.y()}mm {rect.width()}mm {rect.height()}mm\n"
+        )
+        self.render_elements()
+        self.selection_changed.emit(elements.first_emphasized)
+
+    def get_elements_bounding_rect(self, only_selected=False):
+        """
+        Calculate scene bounding rect of elements.
+        If only_selected is True, bounding rect of selected items.
+        If no items match or only_selected is empty, returns rect of all element items.
+        If no element items exist, returns bed rect.
+        """
+        from PyQt6.QtCore import QRectF
+
+        rects = []
+        for item in self._element_items:
+            if item.scene() is not self.scene:
+                continue
+            if only_selected and not item.isSelected():
+                continue
+            r = item.sceneBoundingRect()
+            if not r.isEmpty() and r.width() > 0.01 and r.height() > 0.01:
+                rects.append(r)
+
+        if not rects and only_selected:
+            for item in self._element_items:
+                if item.scene() is not self.scene:
+                    continue
+                r = item.sceneBoundingRect()
+                if not r.isEmpty() and r.width() > 0.01 and r.height() > 0.01:
+                    rects.append(r)
+
+        if not rects:
+            return QRectF(0, 0, float(self.bed_width), float(self.bed_height))
+
+        unified = rects[0]
+        for r in rects[1:]:
+            unified = unified.united(r)
+
+        pad_x = max(5.0, unified.width() * 0.08)
+        pad_y = max(5.0, unified.height() * 0.08)
+        return unified.adjusted(-pad_x, -pad_y, pad_x, pad_y)
+
     def refresh_selection_highlight(self):
         """
         Re-apply pen/brush to the already-rendered items without touching
@@ -282,6 +624,7 @@ class MadGravQtCanvas(QGraphicsView):
             item.setPen(pen)
             item.setBrush(brush)
             item.setZValue(11 if getattr(node, "emphasized", False) else 10)
+        self._update_selection_handles()
 
     def _style_for_node(self, node):
         if getattr(node, "emphasized", False):
@@ -356,17 +699,67 @@ class MadGravQtCanvas(QGraphicsView):
             draw_grid(50.0, QPen(self.grid_primary_color, 1.0))
 
         # Outer bed border
-        painter.setPen(QPen(self.border_color, 1.5))
+        painter.setPen(QPen(self.border_color, 0.75))
         painter.drawRect(bed_rect)
+
+        # Center Bed Measurements Watermark Overlay
+        painter.setPen(QPen(QColor(10, 132, 255, 110) if self._is_dark_theme else QColor(0, 102, 204, 110)))
+        font = painter.font()
+        font.setPointSize(13)
+        font.setBold(True)
+        painter.setFont(font)
+        dim_text = f"[ {self.bed_width:.1f} mm  ×  {self.bed_height:.1f} mm ]"
+        painter.drawText(bed_rect, Qt.AlignmentFlag.AlignCenter, dim_text)
+
+        # LightBurn-Style Graduated Rulers (X Top Ruler & Y Left Ruler)
+        ruler_pen = QPen(QColor("#A0A0B0") if self._is_dark_theme else QColor("#505060"), 0.8)
+        painter.setPen(ruler_pen)
+        ruler_font = painter.font()
+        # drawBackground() runs with the painter already scaled by the
+        # view's current zoom (unlike QGraphicsItem, which can opt out
+        # per-item via ItemIgnoresTransformations) -- a flat point size
+        # here gets zoomed right along with the bed grid, so at anything
+        # above ~1x zoom the ruler numbers render far larger than an "8pt
+        # label" should look. Dividing by the current scale keeps the
+        # on-screen size roughly constant regardless of zoom level.
+        zoom_scale = self.transform().m11() or 1.0
+        ruler_font.setPointSizeF(max(1.0, 9.0 / zoom_scale))
+        ruler_font.setBold(False)
+        painter.setFont(ruler_font)
+
+        # Top X Ruler (-100 to bed_width + 100)
+        start_x = int((rect.left() // 20) * 20) - 20
+        end_x = int(rect.right()) + 40
+        for x in range(start_x, end_x, 10):
+            tick_h = 6 if x % 20 == 0 else 3
+            painter.drawLine(QPointF(x, -tick_h), QPointF(x, 0))
+            if x % 20 == 0:
+                painter.drawText(QRectF(x - 20, -22, 40, 16), Qt.AlignmentFlag.AlignCenter, str(x))
+
+        # Left Y Ruler (-50 to bed_height + 50)
+        start_y = int((rect.top() // 20) * 20) - 20
+        end_y = int(rect.bottom()) + 40
+        for y in range(start_y, end_y, 10):
+            tick_w = 6 if y % 20 == 0 else 3
+            painter.drawLine(QPointF(-tick_w, y), QPointF(0, y))
+            if y % 20 == 0 and y >= 0:
+                painter.drawText(QRectF(-35, y - 8, 30, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(y))
+
+    def _restore_antialiasing(self):
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.viewport().update()
 
     def wheelEvent(self, event):
         self.zoom_step(1 if event.angleDelta().y() > 0 else -1)
 
     def zoom_step(self, direction):
         """Zoom in (direction > 0) or out (direction < 0) by one wheel-step."""
+        # Disable AA during rapid zoom steps to keep frame rate high
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         factor = self.zoom_factor if direction > 0 else 1.0 / self.zoom_factor
         self.scale(factor, factor)
         self.zoom_changed.emit(self.transform().m11())
+        self._aa_timer.start(120)
 
     def reset_zoom(self):
         """Back to 100% (1 scene unit == 1 screen pixel at no extra scale)."""
@@ -387,8 +780,26 @@ class MadGravQtCanvas(QGraphicsView):
             # follows) rather than a click-drag rubber-band gesture.
             self._place_text(event.pos())
             event.accept()
+        elif event.button() == Qt.MouseButton.LeftButton and self.draw_mode == "polygon":
+            # Same single-click-then-dialog shape as Text above -- a
+            # regular polygon/star doesn't have a natural drag gesture
+            # the way rect/ellipse/line's two-corner drag does (dragging
+            # would only set ONE dimension, not sides-count or star-vs-
+            # regular), so a dialog after the click fills in the rest.
+            self._place_polygon(event.pos())
+            event.accept()
         elif event.button() == Qt.MouseButton.LeftButton and self.draw_mode is not None:
             self._start_draw(event.pos())
+            event.accept()
+        elif (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.draw_mode is None
+            and self._handle_at(event.pos()) is not None
+        ):
+            # Checked before the general item-click branch below --
+            # handles visually overlap the selected item's own edges, so
+            # this must win the hit-test first.
+            self._start_handle_drag(self._handle_at(event.pos()), event.pos())
             event.accept()
         elif (
             event.button() == Qt.MouseButton.LeftButton
@@ -400,24 +811,16 @@ class MadGravQtCanvas(QGraphicsView):
             # handling (super().mousePressEvent) ever got a chance to run,
             # making that toolbar button change the cursor but do nothing.
             additive = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            item = self.itemAt(event.pos())
-            if item is not None and item in self._item_to_node:
+            items_at_pos = [it for it in self.items(event.pos()) if it in self._item_to_node]
+            if items_at_pos:
+                item = items_at_pos[0]
                 node = self._item_to_node[item]
-                # Clicking an item that's already part of the (possibly
-                # multi-element) selection keeps that selection as-is, so a
-                # drag from here moves the whole group. Otherwise select
-                # first, same as before.
                 if additive or not getattr(node, "emphasized", False):
                     self._select_at(event.pos(), additive=additive)
                 if getattr(node, "emphasized", False):
                     self._move_start_scene = self.mapToScene(event.pos())
                     self._move_last_scene = self._move_start_scene
             else:
-                # Empty space (or the bed/grid background, neither of
-                # which is a selectable element): start a rubber-band drag
-                # instead. A plain click-without-drag degrades to a
-                # zero-size rect that selects nothing, which still gives
-                # the classic "click empty space to deselect" behavior.
                 self._start_rubber_band(event.pos(), additive=additive)
             event.accept()
         else:
@@ -435,13 +838,16 @@ class MadGravQtCanvas(QGraphicsView):
         elements = getattr(self.context, "elements", None)
         if elements is None:
             return
-        item = self.itemAt(pos)
-        node = self._item_to_node.get(item)
+        node = None
+        for item in self.items(pos):
+            if item in self._item_to_node:
+                node = self._item_to_node[item]
+                break
         if additive:
             current = list(elements.elems(emphasized=True))
             if node is not None:
-                if node in current:
-                    current.remove(node)
+                if any(n is node for n in current):
+                    current = [n for n in current if n is not node]
                 else:
                     current.append(node)
             elements.set_emphasis(current if current else None)
@@ -536,6 +942,9 @@ class MadGravQtCanvas(QGraphicsView):
         if self._move_start_scene is not None:
             self._cancel_move()
             return True
+        if self._active_handle is not None:
+            self._cancel_handle_drag()
+            return True
         return False
 
     def _finish_move(self):
@@ -584,6 +993,9 @@ class MadGravQtCanvas(QGraphicsView):
         elif self._move_start_scene is not None:
             self._update_move(scene_pos)
             event.accept()
+        elif self._active_handle is not None:
+            self._update_handle_drag(event.pos())
+            event.accept()
         else:
             super().mouseMoveEvent(event)
 
@@ -600,6 +1012,9 @@ class MadGravQtCanvas(QGraphicsView):
             event.accept()
         elif event.button() == Qt.MouseButton.LeftButton and self._move_start_scene is not None:
             self._finish_move()
+            event.accept()
+        elif event.button() == Qt.MouseButton.LeftButton and self._active_handle is not None:
+            self._finish_handle_drag(event.pos())
             event.accept()
         else:
             super().mouseReleaseEvent(event)
@@ -663,8 +1078,21 @@ class MadGravQtCanvas(QGraphicsView):
             else:
                 command = (
                     f"rect {rect.x()}mm {rect.y()}mm "
-                    f"{rect.width()}mm {rect.height()}mm\n"
+                    f"{rect.width()}mm {rect.height()}mm"
                 )
+                # "rect"'s own -x/-y options are the rounded rx/ry corner
+                # radii (madgrav/core/elements/shapes.py) -- already fully
+                # supported by the backend, just never exposed by this
+                # tool before. rect_corner_radius_mm is set from the tool
+                # panel's spinbox (qt_main.py), 0 by default (sharp
+                # corners), so this only adds the flags when actually
+                # asked for.
+                if self.rect_corner_radius_mm > 0:
+                    command += (
+                        f" -x {self.rect_corner_radius_mm}mm"
+                        f" -y {self.rect_corner_radius_mm}mm"
+                    )
+                command += "\n"
 
         elements = getattr(self.context, "elements", None)
         if elements is None:
@@ -690,6 +1118,79 @@ class MadGravQtCanvas(QGraphicsView):
         # rather than let it terminate the string early.
         safe_text = text.replace('"', "'")
         command = f'text "{safe_text}" position {scene_pos.x()}mm {scene_pos.y()}mm\n'
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        self.context.console(command)
+        self.render_elements()
+        self.shape_created.emit()
+
+    def _place_polygon(self, pos):
+        # Unlike rect/ellipse/line, a regular polygon/star has no natural
+        # two-corner drag gesture -- a drag only fixes one dimension, not
+        # the sides count or star-vs-regular choice -- so this follows
+        # _place_text's shape instead: one click for the center, then a
+        # dialog for the rest. "polygon" (madgrav/core/elements/shapes.py)
+        # takes an explicit flat list of point coordinates, not a
+        # center+radius+sides convenience form, so the vertices are
+        # computed here and passed through as literal points.
+        import math
+
+        from PyQt6.QtWidgets import (
+            QCheckBox,
+            QDialog,
+            QDialogButtonBox,
+            QDoubleSpinBox,
+            QFormLayout,
+            QSpinBox,
+        )
+
+        scene_pos = self.mapToScene(pos)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Nouveau Polygone")
+        form = QFormLayout(dlg)
+        sides_spin = QSpinBox(dlg)
+        sides_spin.setRange(3, 100)
+        sides_spin.setValue(6)
+        radius_spin = QDoubleSpinBox(dlg)
+        radius_spin.setRange(0.1, 1000)
+        radius_spin.setDecimals(2)
+        radius_spin.setSuffix(" mm")
+        radius_spin.setValue(10.0)
+        star_check = QCheckBox("Étoile", dlg)
+        form.addRow("Côtés / Branches :", sides_spin)
+        form.addRow("Rayon :", radius_spin)
+        form.addRow(star_check)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dlg,
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        sides = sides_spin.value()
+        radius = radius_spin.value()
+        cx, cy = scene_pos.x(), scene_pos.y()
+
+        points = []
+        if star_check.isChecked():
+            inner_radius = radius * 0.5
+            for i in range(sides * 2):
+                r = radius if i % 2 == 0 else inner_radius
+                angle = math.pi * i / sides - math.pi / 2
+                points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+        else:
+            for i in range(sides):
+                angle = 2 * math.pi * i / sides - math.pi / 2
+                points.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+
+        coords = " ".join(f"{x}mm {y}mm" for x, y in points)
+        command = f"polygon {coords}\n"
         elements = getattr(self.context, "elements", None)
         if elements is None:
             return

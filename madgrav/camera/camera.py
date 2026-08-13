@@ -4,6 +4,12 @@ import time
 import cv2
 import numpy as np
 
+from madgrav.camera.autocal import (
+    calibrate_camera_chessboard,
+    compute_aruco_homography,
+    find_chessboard_corners,
+)
+from madgrav.camera.measurement import detect_objects
 from madgrav.kernel import Service
 
 CORNER_SIZE = 25
@@ -118,6 +124,18 @@ class Camera(Service):
         self.setting(list, "alignment_homography", None)
         # Transient (not persisted): last alignment residual error in mm.
         self.alignment_rms = None
+
+        self.setting(bool, "correction_lens", True)
+        self.setting(list, "camera_calibration", None)
+        self.setting(bool, "auto_aruco_homography", False)
+        self.setting(dict, "aruco_marker_coords", None)
+        self.camera_matrix = None
+        self.dist_coeffs = None
+        if self.camera_calibration is not None and len(self.camera_calibration) == 2:
+            self.camera_matrix = np.array(self.camera_calibration[0], dtype=np.float64)
+            self.dist_coeffs = np.array(self.camera_calibration[1], dtype=np.float64)
+        self._chessboard_obj_points = []
+        self._chessboard_img_points = []
 
         try:
             self.uri = int(self.uri)  # URI is an index.
@@ -441,8 +459,18 @@ class Camera(Service):
         return changed
 
     def _undistort(self, frame):
-        """Apply fisheye lens correction (if trained and enabled), else no-op."""
+        """Apply optical lens/fisheye correction (if trained and enabled), else no-op."""
+        if frame is None:
+            return frame
         if (
+            self.camera_matrix is not None
+            and self.dist_coeffs is not None
+            and getattr(self, "correction_lens", True)
+        ):
+            K = np.array(self.camera_matrix, dtype=np.float64)
+            D = np.array(self.dist_coeffs, dtype=np.float64)
+            frame = cv2.undistort(frame, K, D)
+        elif (
             self.fisheye_k is not None
             and self.fisheye_d is not None
             and self.correction_fisheye
@@ -715,6 +743,118 @@ class Camera(Service):
         dest_h = max(1, int(round(bed_height_mm * ALIGNMENT_PX_PER_MM)))
         H = np.array(self.alignment_homography, dtype=np.float64)
         return cv2.warpPerspective(frame, H, (dest_w, dest_h))
+
+    def chessboard_capture(self, checkerboard_size=(6, 9), square_size_mm=25.0):
+        """
+        Capture current raw frame and run standard pinhole camera optical calibration.
+        """
+        _ = self._
+        frame = self._last_raw
+        if frame is None:
+            return False, 0.0, 0
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        ret, corners = find_chessboard_corners(gray, checkerboard_size)
+        if not ret:
+            self.signal(
+                "warning",
+                _("Chessboard pattern not found."),
+                _("Pattern not found."),
+                4,
+            )
+            return False, 0.0, len(self._chessboard_obj_points)
+
+        objp = np.zeros((checkerboard_size[0] * checkerboard_size[1], 3), np.float32)
+        objp[:, :2] = np.mgrid[0 : checkerboard_size[0], 0 : checkerboard_size[1]].T.reshape(-1, 2)
+        objp *= float(square_size_mm)
+
+        self._chessboard_img_points.append(corners)
+        self._chessboard_obj_points.append(objp)
+
+        h, w = gray.shape[:2]
+        try:
+            rms, K, D, _, _ = calibrate_camera_chessboard(
+                self._chessboard_img_points, self._chessboard_obj_points, (w, h)
+            )
+        except cv2.error:
+            if self._chessboard_img_points:
+                del self._chessboard_img_points[-1]
+                del self._chessboard_obj_points[-1]
+            return False, 0.0, len(self._chessboard_obj_points)
+
+        self.camera_matrix = K
+        self.dist_coeffs = D
+        self.camera_calibration = [K.tolist(), D.tolist()]
+        self.correction_lens = True
+        return True, float(rms), len(self._chessboard_obj_points)
+
+    def detect_and_apply_aruco_homography(self, marker_real_coords=None, dictionary_id=None):
+        """
+        Detect ArUco markers in current camera frame and calculate alignment homography
+        converting pixel coordinates to bed mm.
+        """
+        frame = self.get_alignment_capture_frame()
+        if frame is None:
+            raise ValueError("No camera frame available for ArUco auto-calibration.")
+
+        if marker_real_coords is None:
+            marker_real_coords = self.aruco_marker_coords
+
+        if marker_real_coords is None:
+            # Default to corners of active bed device in mm if available
+            try:
+                from madgrav.core.units import UNITS_PER_MM
+                bw = float(self.device.view.unit_width / UNITS_PER_MM)
+                bh = float(self.device.view.unit_height / UNITS_PER_MM)
+            except Exception:
+                bw, bh = 200.0, 200.0
+            marker_real_coords = {
+                0: (0.0, 0.0),
+                1: (bw, 0.0),
+                2: (bw, bh),
+                3: (0.0, bh),
+            }
+
+        # Convert bed mm coordinates to alignment pixel space coordinates (ALIGNMENT_PX_PER_MM)
+        target_dest_px = {}
+        for k, v in marker_real_coords.items():
+            if isinstance(v, (list, tuple)) and len(v) == 4 and isinstance(v[0], (list, tuple)):
+                target_dest_px[k] = [(pt[0] * ALIGNMENT_PX_PER_MM, pt[1] * ALIGNMENT_PX_PER_MM) for pt in v]
+            else:
+                target_dest_px[k] = (v[0] * ALIGNMENT_PX_PER_MM, v[1] * ALIGNMENT_PX_PER_MM)
+
+        H, rms_px, num_markers = compute_aruco_homography(frame, target_dest_px, dictionary_id)
+        self.alignment_homography = H.tolist()
+        self.alignment_rms = float(rms_px / ALIGNMENT_PX_PER_MM)
+        return H, self.alignment_rms, num_markers
+
+    def detect_objects_and_measure(self, min_area_mm2=10.0, threshold_method="otsu", blur_size=5, seg_model=None):
+        """
+        Detect objects in live frame and compute real mm size measurements.
+        """
+        frame = self.get_alignment_capture_frame()
+        if frame is None:
+            return []
+
+        if self.alignment_homography is None:
+            raise ValueError("Alignment homography must be set before measuring objects.")
+
+        # Convert alignment_homography (pixel -> dest_px) to (pixel -> bed_mm) matrix
+        H_px = np.array(self.alignment_homography, dtype=np.float64)
+        S = np.array([
+            [1.0 / ALIGNMENT_PX_PER_MM, 0, 0],
+            [0, 1.0 / ALIGNMENT_PX_PER_MM, 0],
+            [0, 0, 1.0]
+        ], dtype=np.float64)
+        H_mm = S @ H_px
+
+        return detect_objects(
+            frame,
+            H_mm,
+            min_area_mm2=min_area_mm2,
+            threshold_method=threshold_method,
+            blur_size=blur_size,
+            seg_model=seg_model,
+        )
 
     def set_uri(self, uri):
         uri = normalize_camera_uri(uri)

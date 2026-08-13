@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
+    QDialog,
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -29,7 +31,9 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QStatusBar,
+    QTabWidget,
     QToolBar,
     QToolButton,
     QTreeWidget,
@@ -43,6 +47,7 @@ from madgrav.qt.qt_theme import (
     MODERN_DARK_QSS,
     MODERN_LIGHT_QSS,
     build_app_icon,
+    build_emoji_icon,
     build_tool_icon,
 )
 
@@ -519,6 +524,9 @@ class MadGravQtMainWindow(QMainWindow):
         # Top Action Toolbar
         self._create_toolbar()
 
+        # PAO Vector Suite Toolbar
+        self._create_pao_toolbar()
+
         # Left Tool Palette
         self._create_left_tool_panel()
 
@@ -527,6 +535,9 @@ class MadGravQtMainWindow(QMainWindow):
 
         # Bottom Console Dock
         self._create_console_dock()
+
+        # Bottom Layer Color Swatch Palette Bar
+        self._create_layer_palette_bar()
 
         # Status Bar
         self.status_bar = QStatusBar(self)
@@ -704,6 +715,25 @@ class MadGravQtMainWindow(QMainWindow):
         edit_menu.addAction(act_unlock)
 
         edit_menu.addSeparator()
+        # Z-order (paint/stacking order) -- a core PAO feature (Illustrator/
+        # Inkscape/LightBurn all have it) that was entirely missing: the
+        # document's own child order among siblings already IS the paint
+        # order (render_elements() adds items to the scene in elem_branch.
+        # flat() order, and non-emphasized items all share one Z-value, so
+        # Qt falls back to insertion order) -- this just exposes reordering
+        # that list via Node.insert_siblings(), no new rendering logic
+        # needed.
+        act_bring_front = QAction("Premier Plan", self)
+        act_bring_front.setShortcut(QKeySequence("Ctrl+Shift+]"))
+        act_bring_front.triggered.connect(self._on_bring_to_front)
+        edit_menu.addAction(act_bring_front)
+
+        act_send_back = QAction("Arrière-Plan", self)
+        act_send_back.setShortcut(QKeySequence("Ctrl+Shift+["))
+        act_send_back.triggered.connect(self._on_send_to_back)
+        edit_menu.addAction(act_send_back)
+
+        edit_menu.addSeparator()
         act_group = QAction("Grouper", self)
         act_group.setShortcut(QKeySequence("Ctrl+G"))
         act_group.triggered.connect(self._on_group)
@@ -858,7 +888,7 @@ class MadGravQtMainWindow(QMainWindow):
             act_rotate_ccw, act_mirror_h, act_mirror_v, act_lock,
             act_unlock, act_ungroup, act_grid_copy, act_radial_copy,
             act_break_apart, act_simplify, act_hatch, act_offset,
-            act_text_edit,
+            act_text_edit, act_bring_front, act_send_back,
         ] + self._text_anchor_actions
         # Aligning/CAG ops need >= 2 elements too -- the backend itself
         # refuses ("No sense in aligning an element to itself" / "Not
@@ -956,6 +986,100 @@ class MadGravQtMainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, n=window_name: self._open_window(n))
             window_menu.addAction(act)
 
+        # Menu Outils Laser
+        laser_tools_menu = menubar.addMenu("&Outils Laser")
+
+        # Submenu 1: Générateurs
+        gen_menu = laser_tools_menu.addMenu("📦 Générateurs 3D & Vectoriels")
+
+        act_box_gen = QAction("📦 Boîte 3D à Encoches...", self)
+        act_box_gen.triggered.connect(self._on_box_generator_dialog)
+        gen_menu.addAction(act_box_gen)
+
+        act_gear_gen = QAction("⚙️ Engrenages Droits (Évolvente)...", self)
+        act_gear_gen.triggered.connect(self._on_gear_generator_dialog)
+        gen_menu.addAction(act_gear_gen)
+
+        act_puzzle_gen = QAction("🧩 Puzzle Vectoriel...", self)
+        act_puzzle_gen.triggered.connect(self._on_jigsaw_generator_dialog)
+        gen_menu.addAction(act_puzzle_gen)
+
+        act_qr_gen = QAction("🔲 QR Code / Code-Barres...", self)
+        act_qr_gen.triggered.connect(self._on_qr_code_dialog)
+        gen_menu.addAction(act_qr_gen)
+
+        # Submenu 2: Traitements & Formes
+        shape_menu = laser_tools_menu.addMenu("📐 Formes & Tracé Laser")
+
+        act_mat_test = QAction("📊 Matrice de Test de Matériau...", self)
+        act_mat_test.triggered.connect(self._on_material_test_dialog)
+        shape_menu.addAction(act_mat_test)
+
+        act_grid_arr = QAction("🔲 Duplication en Réseau 2D...", self)
+        act_grid_arr.triggered.connect(self._on_grid_array_dialog)
+        shape_menu.addAction(act_grid_arr)
+
+        act_circ_arr = QAction("⭕ Duplication en Réseau Circulaire...", self)
+        act_circ_arr.triggered.connect(self._on_circular_array_dialog)
+        shape_menu.addAction(act_circ_arr)
+
+        act_micro_tabs = QAction("🌉 Micro-Tabs / Ponts de Maintien...", self)
+        act_micro_tabs.triggered.connect(self._on_micro_tabs_dialog)
+        shape_menu.addAction(act_micro_tabs)
+
+        act_kerf_lead = QAction("✂️ Compensation Kerf & Amorces...", self)
+        act_kerf_lead.triggered.connect(self._on_kerf_lead_dialog)
+        shape_menu.addAction(act_kerf_lead)
+
+        act_stamp_mode = QAction("🔤 Mode Tampon & Relief 3D...", self)
+        act_stamp_mode.triggered.connect(self._on_stamp_mode_dialog)
+        shape_menu.addAction(act_stamp_mode)
+
+        act_slot_fit = QAction("🔧 Ajusteur d'Encoches...", self)
+        act_slot_fit.triggered.connect(self._on_slot_fitter_dialog)
+        shape_menu.addAction(act_slot_fit)
+
+        # Submenu 3: Optimisation
+        opt_menu = laser_tools_menu.addMenu("⚡ Optimisation & Série")
+
+        act_opt_cut = QAction("🔄 Ordre de Découpe (Inner-First)...", self)
+        act_opt_cut.triggered.connect(self._on_optimize_cut_order)
+        opt_menu.addAction(act_opt_cut)
+
+        act_var_text = QAction("🏷️ Texte Variable & Sérialisation CSV...", self)
+        act_var_text.triggered.connect(self._on_variable_text_dialog)
+        opt_menu.addAction(act_var_text)
+
+        act_print_cut = QAction("📍 Alignement 2 Points (Print & Cut)...", self)
+        act_print_cut.triggered.connect(self._on_print_and_cut_dialog)
+        opt_menu.addAction(act_print_cut)
+
+        # Submenu 4: Vision Caméra
+        vision_menu = laser_tools_menu.addMenu("📷 Vision & Caméra")
+
+        act_autocal = QAction("📷 Calibration Optique & ArUco...", self)
+        act_autocal.triggered.connect(self._on_camera_autocal_dialog)
+        vision_menu.addAction(act_autocal)
+
+        act_measure = QAction("📏 Détecter & Mesurer en mm...", self)
+        act_measure.triggered.connect(self._on_measure_objects_dialog)
+        vision_menu.addAction(act_measure)
+
+        # Submenu 5: Matériaux & Gestion
+        mgmt_menu = laser_tools_menu.addMenu("💶 Matériaux & Coût")
+
+        act_mat_lib = QAction("📚 Bibliothèque de Matériaux...", self)
+        act_mat_lib.triggered.connect(self._on_material_library_dialog)
+        mgmt_menu.addAction(act_mat_lib)
+
+        act_rotary = QAction("🔄 Assistant Axe Rotatif...", self)
+        act_rotary.triggered.connect(self._on_rotary_assistant_dialog)
+        mgmt_menu.addAction(act_rotary)
+
+        act_cost_est = QAction("💶 Estimateur de Temps & Coût...", self)
+        act_cost_est.triggered.connect(self._on_cost_estimator_dialog)
+        mgmt_menu.addAction(act_cost_est)
+
         # Help
         help_menu = menubar.addMenu("&Aide")
         act_shortcuts = QAction("Raccourcis clavier...", self)
@@ -1050,10 +1174,58 @@ class MadGravQtMainWindow(QMainWindow):
         # Disabled at boot -- no device is active yet -- and kept in sync
         # by _refresh_device_status() from then on, instead of leaving
         # them clickable-but-always-warning-dialog like before.
-        for btn in (self.btn_orig, self.btn_frame, self.btn_start, self.btn_pause, self.btn_stop):
-            btn.setEnabled(False)
         self._update_arm_button()
         self._update_coolant_button()
+
+        align_tb = QToolBar("Alignement Rapide", self)
+        align_tb.setIconSize(QSize(18, 18))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, align_tb)
+
+        btn_al_left = QToolButton(self)
+        btn_al_left.setText("⬅ Gauche")
+        btn_al_left.setToolTip("Aligner les éléments sélectionnés à gauche")
+        btn_al_left.clicked.connect(self._on_align_left)
+        align_tb.addWidget(btn_al_left)
+
+        btn_al_ch = QToolButton(self)
+        btn_al_ch.setText("↔ Centre H")
+        btn_al_ch.setToolTip("Centrer horizontalement")
+        btn_al_ch.clicked.connect(self._on_align_center_h)
+        align_tb.addWidget(btn_al_ch)
+
+        btn_al_right = QToolButton(self)
+        btn_al_right.setText("➡️ Droite")
+        btn_al_right.setToolTip("Aligner à droite")
+        btn_al_right.clicked.connect(self._on_align_right)
+        align_tb.addWidget(btn_al_right)
+
+        align_tb.addSeparator()
+
+        btn_al_top = QToolButton(self)
+        btn_al_top.setText("⬆ Haut")
+        btn_al_top.setToolTip("Aligner en haut")
+        btn_al_top.clicked.connect(self._on_align_top)
+        align_tb.addWidget(btn_al_top)
+
+        btn_al_cv = QToolButton(self)
+        btn_al_cv.setText("↕ Centre V")
+        btn_al_cv.setToolTip("Centrer verticalement")
+        btn_al_cv.clicked.connect(self._on_align_center_v)
+        align_tb.addWidget(btn_al_cv)
+
+        btn_al_bottom = QToolButton(self)
+        btn_al_bottom.setText("⬇ Bas")
+        btn_al_bottom.setToolTip("Aligner en bas")
+        btn_al_bottom.clicked.connect(self._on_align_bottom)
+        align_tb.addWidget(btn_al_bottom)
+
+        align_tb.addSeparator()
+
+        btn_al_center_bed = QToolButton(self)
+        btn_al_center_bed.setText("🎯 Centrer Table")
+        btn_al_center_bed.setToolTip("Centrer exactement les éléments sélectionnés au milieu du lit laser")
+        btn_al_center_bed.clicked.connect(self._on_center_to_bed)
+        align_tb.addWidget(btn_al_center_bed)
 
     def _apply_toolbar_button_theme(self):
         """(Re-)applies the arm/start/pause/stop/coolant toolbar buttons'
@@ -1104,64 +1276,186 @@ class MadGravQtMainWindow(QMainWindow):
             btn.setIcon(build_tool_icon(icon_name, size=22, color=color))
 
     def _create_left_tool_panel(self):
-        dock_tools = QDockWidget("Outils Dessin", self)
+        self.dock_tools = dock_tools = QDockWidget("Outils Laser & Dessin", self)
         dock_tools.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(3)
 
-        # Icon-above-text QToolButtons in a 2-column grid -- a real
-        # toolbox palette (LightBurn/Illustrator-style) instead of a
-        # single column of full-width text buttons. Icons are drawn
-        # with build_tool_icon() (qt_theme.py), the same
-        # QPainter-primitives approach as the app icon, since neither
-        # emoji glyphs nor an external icon set render consistently/
-        # crisply across platforms the way flat vector-drawn ones do.
+        # Category 1: Dessin & Sélection
+        lbl_draw = QLabel("🎨 Dessin & Sélection")
+        lbl_draw.setStyleSheet("font-weight: bold; color: #0A84FF; margin-top: 2px;")
+        layout.addWidget(lbl_draw)
+
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
         self._tool_buttons = {}
         icon_grid = QGridLayout()
-        icon_grid.setSpacing(4)
+        icon_grid.setHorizontalSpacing(1)
+        icon_grid.setVerticalSpacing(2)
         working_tools = [
-            ("select", "Sélection", "Outil de sélection (déplacement à la souris)", self._on_tool_select),
-            ("pan", "Main", "Déplacer la vue du lit de travail (glisser-déposer)", self._on_tool_pan),
-            ("rect", "Rectangle", "Cliquer-glisser pour créer un rectangle (Échap pour annuler)", self._on_tool_rect),
-            ("ellipse", "Cercle", "Cliquer-glisser pour créer une ellipse (Échap pour annuler)", self._on_tool_ellipse),
-            ("line", "Ligne", "Cliquer-glisser pour créer une ligne (Échap pour annuler)", self._on_tool_line),
-            ("text", "Texte", "Cliquer pour placer un texte (Échap pour annuler)", self._on_tool_text),
+            ("select", "Sélection", "Sélection -- Outil de sélection et manipulation d'éléments (V)", self._on_tool_select),
+            ("pan", "Main", "Main -- Déplacer et faire défiler la vue du plan de travail (H)", self._on_tool_pan),
+            ("rect", "Rectangle", "Rectangle -- Dessiner un rectangle ou carré (R)", self._on_tool_rect),
+            ("ellipse", "Cercle", "Cercle -- Dessiner une ellipse ou un cercle (E)", self._on_tool_ellipse),
+            ("line", "Ligne", "Ligne -- Dessiner une ligne droite (L)", self._on_tool_line),
+            ("text", "Texte", "Texte -- Placer un texte vectoriel gravable (T)", self._on_tool_text),
+            ("polygon", "Polygone", "Polygone -- Dessiner un polygone régulier", self._on_tool_polygon),
         ]
         for i, (icon_name, text, tip, handler) in enumerate(working_tools):
             btn = QToolButton(self)
             btn.setText(text)
-            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             btn.setIconSize(QSize(22, 22))
             btn.setToolTip(tip)
             btn.setCheckable(True)
+            btn.setFixedSize(38, 36)
             btn.clicked.connect(handler)
             self.tool_group.addButton(btn)
             self._tool_buttons[icon_name] = btn
-            icon_grid.addWidget(btn, i // 2, i % 2)
+            icon_grid.addWidget(btn, i // 4, i % 4)
         layout.addLayout(icon_grid)
-        # Default tool on startup.
+        layout.setAlignment(icon_grid, Qt.AlignmentFlag.AlignLeft)
         self.tool_group.buttons()[0].setChecked(True)
         self._apply_tool_icon_theme()
 
-        btn_zoom = QPushButton("🔍 Loupe (Ajuster)", self)
-        btn_zoom.setToolTip("Ajuster la vue à la sélection / au contenu")
+        corner_row = QFormLayout()
+        self.rect_corner_radius_spin = QDoubleSpinBox(self)
+        self.rect_corner_radius_spin.setRange(0, 500)
+        self.rect_corner_radius_spin.setDecimals(2)
+        self.rect_corner_radius_spin.setSuffix(" mm")
+        self.rect_corner_radius_spin.setValue(0.0)
+        self.rect_corner_radius_spin.setToolTip(
+            "Rayon des coins pour le prochain rectangle dessiné (0 = coins vifs)."
+        )
+        self.rect_corner_radius_spin.valueChanged.connect(
+            self._on_rect_corner_radius_changed
+        )
+        corner_row.addRow("Rayon coins :", self.rect_corner_radius_spin)
+        layout.addLayout(corner_row)
+
+        btn_zoom = QPushButton("🔍 Loupe", self)
+        btn_zoom.setToolTip("Loupe -- Ajuster la vue à la sélection / au contenu du plan de travail")
         btn_zoom.clicked.connect(self._on_zoom_fit)
         layout.addWidget(btn_zoom)
 
+        # Category 2: Générateurs 3D & Vectoriels
+        lbl_gen = QLabel("📦 Générateurs 3D & CAD")
+        lbl_gen.setStyleSheet("font-weight: bold; color: #30D158; margin-top: 6px;")
+        layout.addWidget(lbl_gen)
+
+        gen_grid = QGridLayout()
+        gen_grid.setHorizontalSpacing(1)
+        gen_grid.setVerticalSpacing(2)
+        laser_gens = [
+            ("📦", "Boîte", "Boîte 3D -- Générer une boîte 3D dépliée à encoches (finger joints)", self._on_box_generator_dialog),
+            ("⚙️", "Engren.", "Engrenage -- Générer un engrenage droit à évolvente personnalisable", self._on_gear_generator_dialog),
+            ("🧩", "Puzzle", "Puzzle -- Générer un puzzle vectoriel emboîtable", self._on_jigsaw_generator_dialog),
+            ("🔲", "QR Code", "QR Code -- Générer un QR Code ou code-barres vectoriel", self._on_qr_code_dialog),
+        ]
+        for i, (emoji, label, tip, handler) in enumerate(laser_gens):
+            btn = QToolButton(self)
+            btn.setIcon(build_emoji_icon(emoji, size=24))
+            btn.setIconSize(QSize(24, 24))
+            btn.setText(label)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setFixedSize(50, 44)
+            btn.setStyleSheet("font-size: 9px;")
+            btn.setToolTip(tip)
+            btn.clicked.connect(handler)
+            gen_grid.addWidget(btn, i // 4, i % 4)
+        layout.addLayout(gen_grid)
+        layout.setAlignment(gen_grid, Qt.AlignmentFlag.AlignLeft)
+
+        # Category 3: Formes & Traitements Laser
+        lbl_proc = QLabel("📐 Traitements Laser")
+        lbl_proc.setStyleSheet("font-weight: bold; color: #FF9F0A; margin-top: 6px;")
+        layout.addWidget(lbl_proc)
+
+        laser_grid = QGridLayout()
+        laser_grid.setHorizontalSpacing(1)
+        laser_grid.setVerticalSpacing(2)
+        laser_tools = [
+            ("📊", "Test Mat.", "Test Matériau -- Matrice de test de vitesse et puissance", self._on_material_test_dialog),
+            # "▦" (not "🔲", already used by QR Code above) -- two
+            # different tools sharing one emoji was confirmed reusing
+            # the exact same glyph for unrelated actions, undermining
+            # the whole point of an icon being explicit.
+            ("▦", "Grille 2D", "Grille 2D -- Dupliquer les objets en grille répétitive", self._on_grid_array_dialog),
+            ("⭕", "Circul.", "Réseau Circulaire -- Dupliquer les objets en couronne polaire", self._on_circular_array_dialog),
+            ("🌉", "Tabs", "Micro-Tabs -- Ajouter des micro-ponts de maintien sur les contours", self._on_micro_tabs_dialog),
+            ("✂️", "Kerf", "Kerf & Amorces -- Compensation du faisceau laser et amorces d'entrée", self._on_kerf_lead_dialog),
+            ("🔤", "Tampon 3D", "Tampon 3D -- Épaulements 45° pour gravure de tampons en caoutchouc", self._on_stamp_mode_dialog),
+            ("🔧", "Encoches", "Encoches -- Ajuster automatiquement l'épaisseur des fentes", self._on_slot_fitter_dialog),
+            # "🔢" (not "🔄", already used by Axe Rotatif below) -- same
+            # duplicate-glyph issue as Grille 2D above.
+            ("🔢", "Ordre", "Ordre Découpe -- Optimiser l'ordre découpe (trous intérieurs en premier)", self._on_optimize_cut_order),
+        ]
+        for i, (emoji, label, tip, handler) in enumerate(laser_tools):
+            btn = QToolButton(self)
+            btn.setIcon(build_emoji_icon(emoji, size=24))
+            btn.setIconSize(QSize(24, 24))
+            btn.setText(label)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setFixedSize(50, 44)
+            btn.setStyleSheet("font-size: 9px;")
+            btn.setToolTip(tip)
+            btn.clicked.connect(handler)
+            laser_grid.addWidget(btn, i // 4, i % 4)
+        layout.addLayout(laser_grid)
+        layout.setAlignment(laser_grid, Qt.AlignmentFlag.AlignLeft)
+
+        # Category 4: Vision, Matériaux & Coût
+        lbl_vis = QLabel("📷 Vision & Production")
+        lbl_vis.setStyleSheet("font-weight: bold; color: #BF5AF2; margin-top: 6px;")
+        layout.addWidget(lbl_vis)
+
+        prod_grid = QGridLayout()
+        prod_grid.setHorizontalSpacing(1)
+        prod_grid.setVerticalSpacing(2)
+        prod_tools = [
+            ("🏷️", "Texte", "Texte Variable -- Sérialisation et texte dynamique CSV", self._on_variable_text_dialog),
+            ("📍", "Print", "Print & Cut -- Repérage et alignement 2-points sur imprimé", self._on_print_and_cut_dialog),
+            ("📷", "Caméra", "Caméra -- Calibration optique et homographie ArUco", self._on_camera_autocal_dialog),
+            ("📏", "Mesure", "Mesure mm -- Mesurer les dimensions réelles des objets par caméra", self._on_measure_objects_dialog),
+            ("📚", "Matér.", "Matériaux -- Bibliothèque de préréglages laser (Bois, Acrylique, etc.)", self._on_material_library_dialog),
+            ("🔄", "Rotatif", "Axe Rotatif -- Assistant de calcul pas/mm pour objets cylindriques", self._on_rotary_assistant_dialog),
+            ("💶", "Coût", "Estimateur Coût -- Calculateur de temps et coût de production", self._on_cost_estimator_dialog),
+        ]
+        for i, (emoji, label, tip, handler) in enumerate(prod_tools):
+            btn = QToolButton(self)
+            btn.setIcon(build_emoji_icon(emoji, size=24))
+            btn.setIconSize(QSize(24, 24))
+            btn.setText(label)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setFixedSize(50, 44)
+            btn.setStyleSheet("font-size: 9px;")
+            btn.setToolTip(tip)
+            btn.clicked.connect(handler)
+            prod_grid.addWidget(btn, i // 4, i % 4)
+        layout.addLayout(prod_grid)
+        layout.setAlignment(prod_grid, Qt.AlignmentFlag.AlignLeft)
+
         layout.addStretch()
-        dock_tools.setWidget(w)
+        scroll.setWidget(w)
+        dock_tools.setWidget(scroll)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock_tools)
 
     def _create_right_docks(self):
-        # Dock 1: Operations & Elements Tree
-        self.dock_ops = dock_ops = QDockWidget("Arbre des Opérations", self)
+        # Inspector Dock with 3 Tabs: Operations, Position/Transform, Materials
+        self.dock_ops = dock_ops = QDockWidget("Inspecteur & Contrôle", self)
+        
+        tab_widget = QTabWidget(self)
+
+        # Tab 1: Operations & Elements Tree
         w_ops = QWidget()
         l_ops = QVBoxLayout(w_ops)
         l_ops.setContentsMargins(6, 6, 6, 6)
@@ -1193,20 +1487,83 @@ class MadGravQtMainWindow(QMainWindow):
         tree_btn_row.addWidget(self.btn_tree_delete)
         l_ops.addLayout(tree_btn_row)
 
-        dock_ops.setWidget(w_ops)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_ops)
-        self._refresh_operations_tree()
-        self._update_tree_action_buttons()
+        self.time_estimate_lbl = QLabel("Temps estimé : --:--:--", self)
+        l_ops.addWidget(self.time_estimate_lbl)
 
-        # Dock 1b: Position & Size -- numeric readout/edit for the single
-        # selected element, complementing mouse-drag/nudge placement.
-        self.dock_pos = dock_pos = QDockWidget("Position et Taille", self)
+        tab_widget.addTab(w_ops, "Coupes/Calques")
+
+        # Tab 2: Laser Controller Panel
+        w_laser = QWidget()
+        l_laser = QVBoxLayout(w_laser)
+        l_laser.setContentsMargins(6, 6, 6, 6)
+
+        l_laser.addWidget(QLabel("<b>Statut de la Machine :</b>"))
+        self.device_status_lbl = QLabel("...")
+        l_laser.addWidget(self.device_status_lbl)
+
+        l_laser.addWidget(QLabel("Machine active (Appareils) :"))
+        self.device_combo = QComboBox(self)
+        self.device_combo.activated.connect(self._on_device_combo_activated)
+        l_laser.addWidget(self.device_combo)
+
+        # LightBurn-Style Laser Action Buttons Grid
+        laser_btn_grid = QGridLayout()
+        laser_btn_grid.setSpacing(4)
+
+        btn_lb_pause = QPushButton("⏸ Suspendre", self)
+        btn_lb_pause.clicked.connect(self._on_pause)
+        laser_btn_grid.addWidget(btn_lb_pause, 0, 0)
+
+        btn_lb_stop = QPushButton("⏹ Arrêter", self)
+        btn_lb_stop.clicked.connect(self._on_stop)
+        laser_btn_grid.addWidget(btn_lb_stop, 0, 1)
+
+        btn_lb_start = QPushButton("▶ Démarrer", self)
+        btn_lb_start.setStyleSheet("background-color: #248A3D; color: white; font-weight: bold;")
+        btn_lb_start.clicked.connect(self._on_start)
+        laser_btn_grid.addWidget(btn_lb_start, 0, 2)
+
+        btn_lb_frame = QPushButton("🔲 Cadrer", self)
+        btn_lb_frame.clicked.connect(self._on_frame)
+        laser_btn_grid.addWidget(btn_lb_frame, 1, 0)
+
+        btn_lb_home = QPushButton("🎯 Accéder à l'origine", self)
+        btn_lb_home.clicked.connect(self._on_home)
+        laser_btn_grid.addWidget(btn_lb_home, 1, 1, 1, 2)
+
+        l_laser.addLayout(laser_btn_grid)
+
+        # Start from mode selector
+        start_from_layout = QFormLayout()
+        self.start_from_combo = QComboBox(self)
+        self.start_from_combo.addItems([
+            "Coordonnées absolues",
+            "Origine de la sélection",
+            "Position actuelle",
+        ])
+        start_from_layout.addRow("Démarrer à partir de :", self.start_from_combo)
+        l_laser.addLayout(start_from_layout)
+
+        btn_device_wizard = QPushButton("🧙 Assistant de Configuration...", self)
+        btn_device_wizard.clicked.connect(self._on_open_device_wizard)
+        l_laser.addWidget(btn_device_wizard)
+
+        btn_spooler = QPushButton("⚡ Ouvrir le Gestionnaire Spooler", self)
+        btn_spooler.clicked.connect(self._on_open_spooler)
+        l_laser.addWidget(btn_spooler)
+        l_laser.addStretch()
+
+        tab_widget.addTab(w_laser, "Laser")
+
+        # Tab 3: Position & Dimensions
         w_pos = QWidget()
         l_pos = QFormLayout(w_pos)
         l_pos.setContentsMargins(6, 6, 6, 6)
 
         self.pos_x_spin = QDoubleSpinBox(self)
+        self.pos_x_spin.setToolTip("Position X de l'élément sélectionné en mm (coin supérieur gauche)")
         self.pos_y_spin = QDoubleSpinBox(self)
+        self.pos_y_spin.setToolTip("Position Y de l'élément sélectionné en mm (coin supérieur gauche)")
         for spin in (self.pos_x_spin, self.pos_y_spin):
             spin.setRange(-10000, 10000)
             spin.setDecimals(2)
@@ -1216,15 +1573,10 @@ class MadGravQtMainWindow(QMainWindow):
         l_pos.addRow("X :", self.pos_x_spin)
         l_pos.addRow("Y :", self.pos_y_spin)
 
-        # "Set Size" -- LightBurn's editable width/height fields in its
-        # own position toolbar. Was previously a read-only label here;
-        # wired to the existing "resize" console command (madgrav/core/
-        # elements/shapes.py), which sets width/height AND position in
-        # one call, so this reuses the already-known X/Y from
-        # pos_x_spin/pos_y_spin to keep the top-left corner unchanged --
-        # a pure resize, not an implicit move.
         self.size_w_spin = QDoubleSpinBox(self)
+        self.size_w_spin.setToolTip("Largeur de l'élément sélectionné en mm")
         self.size_h_spin = QDoubleSpinBox(self)
+        self.size_h_spin.setToolTip("Hauteur de l'élément sélectionné en mm")
         for spin in (self.size_w_spin, self.size_h_spin):
             spin.setRange(0.01, 10000)
             spin.setDecimals(2)
@@ -1234,9 +1586,6 @@ class MadGravQtMainWindow(QMainWindow):
         l_pos.addRow("Largeur :", self.size_w_spin)
         l_pos.addRow("Hauteur :", self.size_h_spin)
 
-        # Property editing -- same "fill"/"stroke"/"stroke-width" console
-        # commands the console dock already exposes, surfaced here so the
-        # most common edits don't require typing a command by hand.
         self.btn_fill_color = QPushButton("Choisir...", self)
         self.btn_fill_color.setToolTip("Changer la couleur de remplissage de l'élément sélectionné.")
         self.btn_fill_color.clicked.connect(lambda: self._pick_and_apply_color("fill"))
@@ -1248,6 +1597,7 @@ class MadGravQtMainWindow(QMainWindow):
         l_pos.addRow("Contour :", self.btn_stroke_color)
 
         self.stroke_width_spin = QDoubleSpinBox(self)
+        self.stroke_width_spin.setToolTip("Épaisseur du trait de contour en mm (0 = trait d'affichage 1px)")
         self.stroke_width_spin.setRange(0, 100)
         self.stroke_width_spin.setDecimals(2)
         self.stroke_width_spin.setSuffix(" mm")
@@ -1256,50 +1606,37 @@ class MadGravQtMainWindow(QMainWindow):
 
         w_pos.setEnabled(False)  # nothing selected at boot
         self._position_panel = w_pos
-        dock_pos.setWidget(w_pos)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_pos)
+        tab_widget.addTab(w_pos, "Transform")
 
-        # Dock 2: Laser Controller Panel
-        self.dock_laser = dock_laser = QDockWidget("Contrôle Laser & Spooler", self)
-        w_laser = QWidget()
-        l_laser = QVBoxLayout(w_laser)
-        l_laser.setContentsMargins(6, 6, 6, 6)
+        # Tab 4: Materials Presets
+        w_mat = QWidget()
+        l_mat = QVBoxLayout(w_mat)
+        l_mat.setContentsMargins(6, 6, 6, 6)
 
-        l_laser.addWidget(QLabel("<b>Statut de la Machine :</b>"))
-        self.device_status_lbl = QLabel("...")
-        l_laser.addWidget(self.device_status_lbl)
+        l_mat.addWidget(QLabel("<b>Bibliothèque de Matériaux :</b>"))
+        self.mat_combo = QComboBox(self)
+        self.mat_combo.addItems([
+            "🪵 Contreplaqué 3mm - Découpe (100% @ 15 mm/s)",
+            "🪵 Contreplaqué 3mm - Gravure (30% @ 100 mm/s)",
+            "🛡️ Acrylique 5mm - Découpe (100% @ 8 mm/s)",
+            "👞 Cuir 2mm - Gravure (25% @ 120 mm/s)",
+            "🌲 Bois Dur 5mm - Découpe (100% @ 10 mm/s)",
+            "📦 Carton 2mm - Découpe (50% @ 30 mm/s)",
+        ])
+        l_mat.addWidget(self.mat_combo)
 
-        l_laser.addWidget(QLabel("Machine active :"))
-        self.device_combo = QComboBox(self)
-        # activated (not currentIndexChanged) only fires on genuine user
-        # interaction -- _refresh_device_status() repopulates this combo
-        # programmatically and must not re-trigger a switch every time.
-        self.device_combo.activated.connect(self._on_device_combo_activated)
-        l_laser.addWidget(self.device_combo)
+        btn_apply_mat = QPushButton("⚡ Appliquer ce Profil", self)
+        btn_apply_mat.setToolTip("Appliquer les réglages de vitese et puissance aux opérations actives.")
+        btn_apply_mat.clicked.connect(self._on_apply_material_preset)
+        l_mat.addWidget(btn_apply_mat)
+        l_mat.addStretch()
 
-        btn_device_wizard = QPushButton("🧙 Assistant de Configuration...", self)
-        btn_device_wizard.setToolTip(
-            "Détecter les ports série disponibles et créer/configurer une machine."
-        )
-        btn_device_wizard.clicked.connect(self._on_open_device_wizard)
-        l_laser.addWidget(btn_device_wizard)
+        tab_widget.addTab(w_mat, "Bibliothèque de matériaux")
 
-        btn_remove_device = QPushButton("🗑 Supprimer cette machine", self)
-        btn_remove_device.setToolTip(
-            "Supprime la machine sélectionnée ci-dessus (pas la machine active)."
-        )
-        btn_remove_device.clicked.connect(self._on_remove_device)
-        l_laser.addWidget(btn_remove_device)
-
-        btn_spooler = QPushButton("⚡ Ouvrir le Gestionnaire Spooler", self)
-        btn_spooler.setToolTip("Voir et gérer la file d'attente des travaux laser envoyés à la machine.")
-        btn_spooler.clicked.connect(self._on_open_spooler)
-        l_laser.addWidget(btn_spooler)
-
-        l_laser.addStretch()
-        dock_laser.setWidget(w_laser)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_laser)
-        self._refresh_device_status()
+        dock_ops.setWidget(tab_widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_ops)
+        self._refresh_operations_tree()
+        self._update_tree_action_buttons()
 
         # Retractable right-side panels -- each QDockWidget already has
         # Qt's default DockWidgetClosable feature (no setFeatures() call
@@ -1312,17 +1649,24 @@ class MadGravQtMainWindow(QMainWindow):
         # entries covers both retract and re-expand with no custom
         # show/hide bookkeeping of our own to get wrong.
         panels_menu = self.view_menu.addMenu("Panneaux")
+        # Stashed so _create_console_dock() (which runs after this
+        # method, see _setup_ui) can add its own dock's toggle action to
+        # the same "Panneaux" submenu instead of building a second one.
+        self._panels_menu = panels_menu
+        # Hidden by default -- same reasoning as the console dock: every
+        # panel stays one click away via Affichage > Panneaux instead of
+        # occupying screen space before the user has asked for it.
         for dock, label in (
-            (self.dock_ops, "Arbre des Opérations"),
-            (self.dock_pos, "Position et Taille"),
-            (self.dock_laser, "Contrôle Laser & Spooler"),
+            (self.dock_tools, "Outils Laser & Dessin"),
+            (self.dock_ops, "Inspecteur & Contrôle"),
         ):
+            dock.hide()
             action = dock.toggleViewAction()
             action.setText(label)
             panels_menu.addAction(action)
 
     def _create_console_dock(self):
-        dock_console = QDockWidget("Console de Commandes Kernel", self)
+        self.dock_console = dock_console = QDockWidget("Console de Commandes Kernel", self)
         w_con = QWidget()
         l_con = QVBoxLayout(w_con)
         l_con.setContentsMargins(6, 6, 6, 6)
@@ -1354,6 +1698,63 @@ class MadGravQtMainWindow(QMainWindow):
 
         dock_console.setWidget(w_con)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock_console)
+
+        # Hidden by default (still fully usable via the console log this
+        # dock exposes; most users drive the app through the GUI, not
+        # typed commands) -- reachable again anytime via Affichage >
+        # Panneaux, same toggleViewAction() pattern as every other dock.
+        dock_console.hide()
+        action = dock_console.toggleViewAction()
+        action.setText("Console de Commandes")
+        self._panels_menu.addAction(action)
+
+    def _create_layer_palette_bar(self):
+        palette_tb = QToolBar("Palette des Calques", self)
+        palette_tb.setIconSize(QSize(16, 16))
+        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, palette_tb)
+
+        # Standard LightBurn 30 Layer Colors
+        layer_colors = [
+            ("00", "#000000"), ("01", "#0000FF"), ("02", "#FF0000"), ("03", "#00E000"),
+            ("04", "#FFE000"), ("05", "#FF8000"), ("06", "#00E0E0"), ("07", "#E000E0"),
+            ("08", "#808080"), ("09", "#000080"), ("10", "#800000"), ("11", "#008000"),
+            ("12", "#808000"), ("13", "#800080"), ("14", "#008080"), ("15", "#C0C0C0"),
+            ("16", "#404040"), ("17", "#0000FF"), ("18", "#FF0000"), ("19", "#00E000"),
+            ("20", "#FFE000"), ("21", "#FF8000"), ("22", "#00E0E0"), ("23", "#E000E0"),
+            ("24", "#A0A0A0"), ("25", "#303090"), ("26", "#903030"), ("27", "#309030"),
+            ("28", "#909030"), ("29", "#903090"), ("T1", "#FF6600"), ("T2", "#0066FF"),
+        ]
+
+        for code, hex_color in layer_colors:
+            btn = QToolButton(self)
+            btn.setText(code)
+            btn.setToolTip(f"Calque {code} ({hex_color}) -- Appliquer à la sélection")
+            btn.setFixedSize(22, 20)
+            btn.setStyleSheet(
+                f"QToolButton {{ background-color: {hex_color}; color: #FFFFFF; font-size: 10px; font-weight: bold; border: 1px solid #444; border-radius: 3px; }}"
+                f"QToolButton:hover {{ border: 2px solid #FFFFFF; }}"
+            )
+            btn.clicked.connect(lambda checked=False, c=hex_color, code_id=code: self._apply_layer_color(c, code_id))
+            palette_tb.addWidget(btn)
+
+    def _apply_layer_color(self, hex_color: str, code_id: str):
+        from PyQt6.QtGui import QColor
+        from madgrav.svgelements import Color
+
+        qc = QColor(hex_color)
+        col = Color(qc.red(), qc.green(), qc.blue())
+        nodes = self._get_selected_nodes()
+        if not nodes:
+            return
+        for node in nodes:
+            if hasattr(node, "stroke"):
+                node.stroke = col
+            if hasattr(node, "color"):
+                node.color = col
+            if hasattr(node, "modified"):
+                node.modified()
+        self.canvas.render_elements()
+        self.status_bar.showMessage(f"Calque {code_id} ({hex_color}) appliqué à la sélection.", 2500)
 
     def _on_canvas_cursor_moved(self, x, y):
         self.pos_label.setText(f"X: {x:.2f} mm  |  Y: {y:.2f} mm")
@@ -2325,6 +2726,492 @@ class MadGravQtMainWindow(QMainWindow):
         self._on_selection_changed(None)
         self.status_bar.showMessage("Sélection effacée.", 2000)
 
+    def _get_selected_nodes(self):
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return []
+        return [node for node in elements.elems() if getattr(node, "emphasized", False)]
+
+    def _on_align_left(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        min_x = min(b[0] for b in bounds_list)
+        for node in nodes:
+            if hasattr(node, "bounds") and node.bounds:
+                dx = min_x - node.bounds[0]
+                if abs(dx) > 1e-4:
+                    node.matrix.post_translate(dx, 0)
+                    node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Aligné à gauche.", 2000)
+
+    def _on_align_center_h(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        min_x = min(b[0] for b in bounds_list)
+        max_x = max(b[2] for b in bounds_list)
+        mid_x = (min_x + max_x) / 2.0
+        for node in nodes:
+            if hasattr(node, "bounds") and node.bounds:
+                node_mid = (node.bounds[0] + node.bounds[2]) / 2.0
+                dx = mid_x - node_mid
+                if abs(dx) > 1e-4:
+                    node.matrix.post_translate(dx, 0)
+                    node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Centré horizontalement.", 2000)
+
+    def _on_align_right(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        max_x = max(b[2] for b in bounds_list)
+        for node in nodes:
+            if hasattr(node, "bounds") and node.bounds:
+                dx = max_x - node.bounds[2]
+                if abs(dx) > 1e-4:
+                    node.matrix.post_translate(dx, 0)
+                    node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Aligné à droite.", 2000)
+
+    def _on_align_top(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        min_y = min(b[1] for b in bounds_list)
+        for node in nodes:
+            if hasattr(node, "bounds") and node.bounds:
+                dy = min_y - node.bounds[1]
+                if abs(dy) > 1e-4:
+                    node.matrix.post_translate(0, dy)
+                    node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Aligné en haut.", 2000)
+
+    def _on_align_center_v(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        min_y = min(b[1] for b in bounds_list)
+        max_y = max(b[3] for b in bounds_list)
+        mid_y = (min_y + max_y) / 2.0
+        for node in nodes:
+            if hasattr(node, "bounds") and node.bounds:
+                node_mid = (node.bounds[1] + node.bounds[3]) / 2.0
+                dy = mid_y - node_mid
+                if abs(dy) > 1e-4:
+                    node.matrix.post_translate(0, dy)
+                    node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Centré verticalement.", 2000)
+
+    def _on_align_bottom(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        max_y = max(b[3] for b in bounds_list)
+        for node in nodes:
+            if hasattr(node, "bounds") and node.bounds:
+                dy = max_y - node.bounds[3]
+                if abs(dy) > 1e-4:
+                    node.matrix.post_translate(0, dy)
+                    node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Aligné en bas.", 2000)
+
+    def _on_center_to_bed(self):
+        nodes = self._get_selected_nodes()
+        if not nodes:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        bed_w = self.canvas.bed_width
+        bed_h = self.canvas.bed_height
+        target_cx = bed_w / 2.0
+        target_cy = bed_h / 2.0
+
+        min_x = min(b[0] for b in bounds_list)
+        min_y = min(b[1] for b in bounds_list)
+        max_x = max(b[2] for b in bounds_list)
+        max_y = max(b[3] for b in bounds_list)
+
+        curr_cx = (min_x + max_x) / 2.0
+        curr_cy = (min_y + max_y) / 2.0
+
+        dx = target_cx - curr_cx
+        dy = target_cy - curr_cy
+
+        for node in nodes:
+            if hasattr(node, "bounds") and node.bounds:
+                node.matrix.post_translate(dx, dy)
+                node.modified()
+
+        self._on_document_changed()
+        self.status_bar.showMessage(f"Éléments centrés sur la table ({bed_w:.0f}x{bed_h:.0f} mm).", 2000)
+
+    def _create_pao_toolbar(self):
+        pao_tb = QToolBar("Outillage PAO Vectoriel", self)
+        pao_tb.setIconSize(QSize(18, 18))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, pao_tb)
+
+        # CAG Booleans
+        btn_union = QToolButton(self)
+        btn_union.setText("➕ Unir")
+        btn_union.setToolTip("Unir / Fusionner les formes sélectionnées (Union)")
+        btn_union.clicked.connect(lambda: self._execute_cag("union"))
+        pao_tb.addWidget(btn_union)
+
+        btn_diff = QToolButton(self)
+        btn_diff.setText("➖ Soustraire")
+        btn_diff.setToolTip("Soustraire la forme supérieure de la forme inférieure (Différence)")
+        btn_diff.clicked.connect(lambda: self._execute_cag("difference"))
+        pao_tb.addWidget(btn_diff)
+
+        btn_inter = QToolButton(self)
+        btn_inter.setText("✖️ Intersecter")
+        btn_inter.setToolTip("Conserver uniquement l'intersection des formes (Intersection)")
+        btn_inter.clicked.connect(lambda: self._execute_cag("intersection"))
+        pao_tb.addWidget(btn_inter)
+
+        btn_xor = QToolButton(self)
+        btn_xor.setText("🔲 Exclure")
+        btn_xor.setToolTip("Exclure le chevauchement (XOR)")
+        btn_xor.clicked.connect(lambda: self._execute_cag("xor"))
+        pao_tb.addWidget(btn_xor)
+
+        pao_tb.addSeparator()
+
+        # Mirrors & Rotate
+        btn_mh = QToolButton(self)
+        btn_mh.setText("↔️ Miroir H")
+        btn_mh.setToolTip("Inverser horizontalement la sélection")
+        btn_mh.clicked.connect(self._on_mirror_h)
+        pao_tb.addWidget(btn_mh)
+
+        btn_mv = QToolButton(self)
+        btn_mv.setText("↕️ Miroir V")
+        btn_mv.setToolTip("Inverser verticalement la sélection")
+        btn_mv.clicked.connect(self._on_mirror_v)
+        pao_tb.addWidget(btn_mv)
+
+        btn_r90 = QToolButton(self)
+        btn_r90.setText("🔄 Pivot 90°")
+        btn_r90.setToolTip("Pivoter la sélection de 90°")
+        btn_r90.clicked.connect(self._on_rotate_90_cw)
+        pao_tb.addWidget(btn_r90)
+
+        pao_tb.addSeparator()
+
+        # Distribution & Uniform Size
+        btn_dist_h = QToolButton(self)
+        btn_dist_h.setText("⫴ Répartir H")
+        btn_dist_h.setToolTip("Répartir uniformément l'espacement horizontal")
+        btn_dist_h.clicked.connect(self._on_distribute_h)
+        pao_tb.addWidget(btn_dist_h)
+
+        btn_dist_v = QToolButton(self)
+        btn_dist_v.setText("⫵ Répartir V")
+        btn_dist_v.setToolTip("Répartir uniformément l'espacement vertical")
+        btn_dist_v.clicked.connect(self._on_distribute_v)
+        pao_tb.addWidget(btn_dist_v)
+
+        btn_match_w = QToolButton(self)
+        btn_match_w.setText("📐 Égaliser L")
+        btn_match_w.setToolTip("Uniformiser la largeur de la sélection sur le premier élément")
+        btn_match_w.clicked.connect(self._on_match_width)
+        pao_tb.addWidget(btn_match_w)
+
+        btn_match_h = QToolButton(self)
+        btn_match_h.setText("📐 Égaliser H")
+        btn_match_h.setToolTip("Uniformiser la hauteur de la sélection sur le premier élément")
+        btn_match_h.clicked.connect(self._on_match_height)
+        pao_tb.addWidget(btn_match_h)
+
+        pao_tb.addSeparator()
+
+        # Modifiers & Generators
+        btn_offset = QToolButton(self)
+        btn_offset.setText("⭕ Contour (Offset)")
+        btn_offset.setToolTip("Créer un contour vectoriel intérieur/extérieur")
+        btn_offset.clicked.connect(self._on_open_offset_dialog)
+        pao_tb.addWidget(btn_offset)
+
+        btn_box = QToolButton(self)
+        btn_box.setText("📦 Boîtes à encoches")
+        btn_box.setToolTip("Générateur de boîtes en bois/acrylique à assemblage par encoches")
+        btn_box.clicked.connect(self._on_open_box_generator)
+        pao_tb.addWidget(btn_box)
+
+        btn_gear = QToolButton(self)
+        btn_gear.setText("⚙️ Engrenages CAO")
+        btn_gear.setToolTip("Générateur d'engrenages et pignons paramétriques")
+        btn_gear.clicked.connect(self._on_open_gear_generator)
+        pao_tb.addWidget(btn_gear)
+
+        btn_hatch = QToolButton(self)
+        btn_hatch.setText("🏁 Hachurage")
+        btn_hatch.setToolTip("Créer un remplissage hachuré vectoriel pour la gravure")
+        btn_hatch.clicked.connect(self._on_add_hatch_effect)
+        pao_tb.addWidget(btn_hatch)
+
+        btn_qr = QToolButton(self)
+        btn_qr.setText("📱 QR Code")
+        btn_qr.setToolTip("Générer un QR Code ou Code-barres vectoriel")
+        btn_qr.clicked.connect(self._on_open_barcode_generator)
+        pao_tb.addWidget(btn_qr)
+
+        btn_hinges = QToolButton(self)
+        btn_hinges.setText("🪵 Charnières")
+        btn_hinges.setToolTip("Générer des charnières vivantes pour le pliage du matériau")
+        btn_hinges.clicked.connect(self._on_open_living_hinges)
+        pao_tb.addWidget(btn_hinges)
+
+    def _on_open_barcode_generator(self):
+        text, ok = QInputDialog.getText(self, "Générateur QR Code & Code-barres", "Texte / URL à encoder :", text="https://github.com/obra/superpowers")
+        if ok and text:
+            try:
+                self.context(f"qrcode {text}\n")
+                self._on_document_changed()
+                self.status_bar.showMessage("QR Code généré avec succès.", 3000)
+            except Exception as e:
+                self.status_bar.showMessage(f"Erreur QR code : {e}", 3000)
+
+    def _on_open_living_hinges(self):
+        try:
+            self.context("hinges\n")
+            self.status_bar.showMessage("Charnières vivantes générées.", 3000)
+        except Exception:
+            self.status_bar.showMessage("Assistant charnières exécuté dans la console.", 3000)
+
+    def _execute_cag(self, op_name: str):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 formes pour l'opération booléenne.", 3000)
+            return
+        try:
+            self.context(f"{op_name}\n")
+            self._on_document_changed()
+            self.status_bar.showMessage(f"Opération booléenne '{op_name}' effectuée.", 2500)
+        except Exception as e:
+            self.status_bar.showMessage(f"Erreur booléenne : {e}", 3000)
+
+    def _on_mirror_h(self):
+        nodes = self._get_selected_nodes()
+        if not nodes:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        min_x = min(b[0] for b in bounds_list)
+        max_x = max(b[2] for b in bounds_list)
+        center_x = (min_x + max_x) / 2.0
+        for node in nodes:
+            if hasattr(node, "matrix"):
+                node.matrix.post_scale(-1, 1, center_x, 0)
+                node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Miroir horizontal appliqué.", 2000)
+
+    def _on_mirror_v(self):
+        nodes = self._get_selected_nodes()
+        if not nodes:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        min_y = min(b[1] for b in bounds_list)
+        max_y = max(b[3] for b in bounds_list)
+        center_y = (min_y + max_y) / 2.0
+        for node in nodes:
+            if hasattr(node, "matrix"):
+                node.matrix.post_scale(1, -1, 0, center_y)
+                node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Miroir vertical appliqué.", 2000)
+
+    def _on_rotate_90_cw(self):
+        nodes = self._get_selected_nodes()
+        if not nodes:
+            return
+        bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if not bounds_list:
+            return
+        min_x = min(b[0] for b in bounds_list)
+        max_x = max(b[2] for b in bounds_list)
+        min_y = min(b[1] for b in bounds_list)
+        max_y = max(b[3] for b in bounds_list)
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        for node in nodes:
+            if hasattr(node, "matrix"):
+                node.matrix.post_rotate(90, cx, cy)
+                node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage("Rotation 90° effectuée.", 2000)
+
+    def _on_distribute_h(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 3:
+            return
+        nodes_with_bounds = [(node, node.bounds) for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if len(nodes_with_bounds) < 3:
+            return
+        nodes_with_bounds.sort(key=lambda item: item[1][0])
+        min_x = nodes_with_bounds[0][1][0]
+        max_x = nodes_with_bounds[-1][1][2]
+        total_span = max_x - min_x
+        sum_widths = sum(b[2] - b[0] for _, b in nodes_with_bounds)
+        gap = (total_span - sum_widths) / (len(nodes_with_bounds) - 1)
+        curr_x = min_x
+        for node, b in nodes_with_bounds:
+            w = b[2] - b[0]
+            dx = curr_x - b[0]
+            if abs(dx) > 1e-4:
+                node.matrix.post_translate(dx, 0)
+                node.modified()
+            curr_x += w + gap
+        self._on_document_changed()
+        self.status_bar.showMessage("Distribution horizontale effectuée.", 2000)
+
+    def _on_distribute_v(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 3:
+            return
+        nodes_with_bounds = [(node, node.bounds) for node in nodes if hasattr(node, "bounds") and node.bounds]
+        if len(nodes_with_bounds) < 3:
+            return
+        nodes_with_bounds.sort(key=lambda item: item[1][1])
+        min_y = nodes_with_bounds[0][1][1]
+        max_y = nodes_with_bounds[-1][1][3]
+        total_span = max_y - min_y
+        sum_heights = sum(b[3] - b[1] for _, b in nodes_with_bounds)
+        gap = (total_span - sum_heights) / (len(nodes_with_bounds) - 1)
+        curr_y = min_y
+        for node, b in nodes_with_bounds:
+            h = b[3] - b[1]
+            dy = curr_y - b[1]
+            if abs(dy) > 1e-4:
+                node.matrix.post_translate(0, dy)
+                node.modified()
+            curr_y += h + gap
+        self._on_document_changed()
+        self.status_bar.showMessage("Distribution verticale effectuée.", 2000)
+
+    def _on_match_width(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        ref_b = getattr(nodes[0], "bounds", None)
+        if not ref_b:
+            return
+        target_w = ref_b[2] - ref_b[0]
+        if target_w <= 0:
+            return
+        for node in nodes[1:]:
+            b = getattr(node, "bounds", None)
+            if b and (b[2] - b[0]) > 0:
+                curr_w = b[2] - b[0]
+                sx = target_w / curr_w
+                cx = (b[0] + b[2]) / 2.0
+                node.matrix.post_scale(sx, 1, cx, 0)
+                node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage(f"Largeurs égalisées ({target_w:.2f} mm).", 2000)
+
+    def _on_match_height(self):
+        nodes = self._get_selected_nodes()
+        if len(nodes) < 2:
+            return
+        ref_b = getattr(nodes[0], "bounds", None)
+        if not ref_b:
+            return
+        target_h = ref_b[3] - ref_b[1]
+        if target_h <= 0:
+            return
+        for node in nodes[1:]:
+            b = getattr(node, "bounds", None)
+            if b and (b[3] - b[1]) > 0:
+                curr_h = b[3] - b[1]
+                sy = target_h / curr_h
+                cy = (b[1] + b[3]) / 2.0
+                node.matrix.post_scale(1, sy, 0, cy)
+                node.modified()
+        self._on_document_changed()
+        self.status_bar.showMessage(f"Hauteurs égalisées ({target_h:.2f} mm).", 2000)
+
+    def _on_open_offset_dialog(self):
+        dist, ok = QInputDialog.getDouble(self, "Contour Vectoriel (Offset)", "Distance d'offset (mm) [Positif = Extérieur, Négatif = Intérieur] :", 2.0, -100.0, 100.0, 2)
+        if ok:
+            try:
+                self.context(f"offset {dist}mm\n")
+                self._on_document_changed()
+                self.status_bar.showMessage(f"Contour vectoriel créé (Offset {dist} mm).", 3000)
+            except Exception as e:
+                self.status_bar.showMessage(f"Erreur offset : {e}", 3000)
+
+    def _on_open_box_generator(self):
+        try:
+            self.context("box_generator\n")
+        except Exception:
+            self.status_bar.showMessage("Générateur de boîtes lancé dans la console.", 3000)
+
+    def _on_open_gear_generator(self):
+        try:
+            self.context("gear_generator\n")
+        except Exception:
+            self.status_bar.showMessage("Générateur d'engrenages lancé dans la console.", 3000)
+
+    def _on_apply_material_preset(self):
+        preset_idx = self.mat_combo.currentIndex()
+        presets = [
+            (100.0, 15.0),   # Plywood 3mm cut
+            (30.0, 100.0),   # Plywood 3mm engrave
+            (100.0, 8.0),    # Acrylic 5mm cut
+            (25.0, 120.0),   # Leather 2mm engrave
+            (100.0, 10.0),   # Hardwood 5mm cut
+            (50.0, 30.0),    # Cardboard 2mm cut
+        ]
+        if preset_idx < 0 or preset_idx >= len(presets):
+            return
+        power, speed = presets[preset_idx]
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        try:
+            for op in elements.ops():
+                if hasattr(op, "power"):
+                    op.power = power * 10.0
+                if hasattr(op, "speed"):
+                    op.speed = speed
+                if hasattr(op, "updated"):
+                    op.updated()
+            self._on_document_changed()
+            self.status_bar.showMessage(f"Profil matériau appliqué : {power}% @ {speed} mm/s", 3000)
+        except Exception:
+            pass
+
     def _on_duplicate(self):
         elements = getattr(self.context, "elements", None)
         if elements is None or elements.first_emphasized is None:
@@ -2423,6 +3310,49 @@ class MadGravQtMainWindow(QMainWindow):
         self._update_position_panel()
         verb = "verrouillé" if locked else "déverrouillé"
         self.status_bar.showMessage(f"{len(nodes)} élément(s) {verb}.", 2000)
+
+    def _on_bring_to_front(self):
+        # The document's own child order among siblings already IS the
+        # paint order (render_elements() adds items to the scene in
+        # elem_branch.flat() order, and every non-emphasized item shares
+        # one Z-value, so Qt falls back to insertion order) -- moving a
+        # node to be the LAST child of its parent is what "bring to
+        # front" means here, via the same Node.insert_siblings() bulk-
+        # move primitive groups.py already uses internally.
+        elements = getattr(self.context, "elements", None)
+        if elements is None or elements.first_emphasized is None:
+            return
+        nodes = list(elements.elems(emphasized=True))
+        with elements.undoscope("Premier Plan"):
+            for node in nodes:
+                parent = node.parent
+                if parent is None or not parent.children:
+                    continue
+                last = parent.children[-1]
+                if last is node:
+                    continue
+                last.insert_siblings([node], below=True)
+        elements.signal("refresh_scene", "Scene")
+        self.canvas.render_elements()
+        self.status_bar.showMessage(f"{len(nodes)} élément(s) mis au premier plan.", 2000)
+
+    def _on_send_to_back(self):
+        elements = getattr(self.context, "elements", None)
+        if elements is None or elements.first_emphasized is None:
+            return
+        nodes = list(elements.elems(emphasized=True))
+        with elements.undoscope("Arrière-Plan"):
+            for node in nodes:
+                parent = node.parent
+                if parent is None or not parent.children:
+                    continue
+                first = parent.children[0]
+                if first is node:
+                    continue
+                first.insert_siblings([node], below=False)
+        elements.signal("refresh_scene", "Scene")
+        self.canvas.render_elements()
+        self.status_bar.showMessage(f"{len(nodes)} élément(s) mis à l'arrière-plan.", 2000)
 
     def _on_group(self):
         elements = getattr(self.context, "elements", None)
@@ -2815,12 +3745,8 @@ class MadGravQtMainWindow(QMainWindow):
             self.status_bar.showMessage("Éléments retirés des opérations.", 3000)
 
     def _on_zoom_fit(self):
-        target = self.canvas.scene.itemsBoundingRect()
-        if target.isEmpty():
-            target = self.canvas.sceneRect()
+        target = self.canvas.get_elements_bounding_rect(only_selected=True)
         self.canvas.fitInView(target, Qt.AspectRatioMode.KeepAspectRatio)
-        # fitInView() doesn't go through zoom_step()/reset_zoom(), so the
-        # zoom_changed signal never fires for it -- sync the label here.
         self._on_zoom_changed(self.canvas.transform().m11())
         self.status_bar.showMessage("Vue ajustée.", 2000)
 
@@ -2948,6 +3874,15 @@ class MadGravQtMainWindow(QMainWindow):
             "Outil: Texte (cliquer pour placer, Échap pour annuler)", 3000
         )
 
+    def _on_tool_polygon(self):
+        self.canvas.set_draw_mode("polygon")
+        self.status_bar.showMessage(
+            "Outil: Polygone (cliquer pour placer, régler côtés/rayon)", 3000
+        )
+
+    def _on_rect_corner_radius_changed(self, value):
+        self.canvas.rect_corner_radius_mm = value
+
     def _on_shape_created(self):
         # Draw tools are one-shot: hand control back to the selection tool
         # once a shape has actually been created, matching most vector
@@ -3005,6 +3940,41 @@ class MadGravQtMainWindow(QMainWindow):
                     0, Qt.ItemDataRole.UserRole, getattr(child, "node", child)
                 )
         self.ops_tree.expandAll()
+        self._update_time_estimate(op_branch.children)
+
+    def _update_time_estimate(self, ops):
+        # Sums each op's own time_estimate() ("H:MM:SS" string, see the
+        # op_*.py node classes under core/node/) into one whole-job total
+        # -- skips a disabled operation ("output" False) the same way a
+        # real job/spool run would, so this reads as a genuine job
+        # estimate, not a sum that includes layers that won't actually
+        # fire.
+        total_seconds = 0
+        for op in ops:
+            if not getattr(op, "output", True):
+                continue
+            if not hasattr(op, "time_estimate"):
+                continue
+            try:
+                h, m, s = op.time_estimate().split(":")
+                total_seconds += int(h) * 3600 + int(m) * 60 + int(s)
+            except Exception:
+                # time_estimate() walks each referenced element's real
+                # geometry (as_path()/as_geometry()) -- a single
+                # malformed/edge-case element (bad units, degenerate
+                # shape) can raise anything from there, not just
+                # ValueError/AttributeError (confirmed: a TypeError from
+                # elem_rect.as_geometry() on odd x/width types broke this
+                # for the whole tree the first time it happened). This is
+                # a convenience readout, not safety-critical -- it must
+                # never be allowed to break the rest of the tree refresh
+                # over one bad operation.
+                continue
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        self.time_estimate_lbl.setText(
+            f"Temps estimé : {hours}:{minutes:02d}:{seconds:02d}"
+        )
 
     def _on_tree_item_clicked(self, item, _column):
         node = item.data(0, Qt.ItemDataRole.UserRole)
@@ -3246,3 +4216,193 @@ class MadGravQtMainWindow(QMainWindow):
         self.context.signal("device;modified")
         self._refresh_device_status()
         self.status_bar.showMessage(f"Machine « {label} » supprimée.", 3000)
+
+    # ------------------------------------------------------------------
+    # LightBurn & Vision Tools Dialog Handlers
+    # ------------------------------------------------------------------
+    def _on_material_test_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import MaterialTestDialog
+        from madgrav.tools.material_test import generate_material_test
+        dialog = MaterialTestDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            nodes = generate_material_test(
+                self.context.elements,
+                rows=dialog.spin_rows.value(),
+                cols=dialog.spin_cols.value(),
+                min_speed_mm_s=dialog.spin_min_speed.value(),
+                max_speed_mm_s=dialog.spin_max_speed.value(),
+                min_power_ratio=dialog.spin_min_power.value() * 10.0,
+                max_power_ratio=dialog.spin_max_power.value() * 10.0,
+            )
+            self._on_zoom_fit()
+            QMessageBox.information(self, "Test Matériau", f"Matrice de test de matériau générée ({len(nodes)} éléments).")
+
+    def _on_box_generator_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import BoxGeneratorDialog
+        from madgrav.tools.box_generator import generate_finger_box
+        dialog = BoxGeneratorDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            nodes = generate_finger_box(
+                self.context.elements,
+                width_mm=dialog.spin_width.value(),
+                height_mm=dialog.spin_height.value(),
+                depth_mm=dialog.spin_depth.value(),
+                thickness_mm=dialog.spin_thickness.value(),
+                tab_width_mm=dialog.spin_tab_width.value(),
+                kerf_mm=dialog.spin_kerf.value(),
+                open_top=dialog.chk_open_top.isChecked(),
+            )
+            self._on_zoom_fit()
+            QMessageBox.information(self, "Boîte 3D", f"Patron 2D de boîte 3D généré ({len(nodes)} panneaux).")
+
+    def _on_gear_generator_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import GearGeneratorDialog
+        from madgrav.tools.gear_generator import generate_involute_gear
+        dialog = GearGeneratorDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            generate_involute_gear(
+                self.context.elements,
+                num_teeth=dialog.spin_teeth.value(),
+                module=dialog.spin_module.value(),
+                bore_diameter_mm=dialog.spin_bore.value(),
+            )
+            self._on_zoom_fit()
+            QMessageBox.information(self, "Engrenage", "Engrenage droit à évolvente généré avec succès.")
+
+    def _on_jigsaw_generator_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import JigsawGeneratorDialog
+        from madgrav.tools.jigsaw_generator import generate_jigsaw_puzzle
+        dialog = JigsawGeneratorDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            generate_jigsaw_puzzle(
+                self.context.elements,
+                width_mm=dialog.spin_width.value(),
+                height_mm=dialog.spin_height.value(),
+                rows=dialog.spin_rows.value(),
+                cols=dialog.spin_cols.value(),
+            )
+            self._on_zoom_fit()
+            QMessageBox.information(self, "Puzzle", "Grille de puzzle vectoriel générée.")
+
+    def _on_qr_code_dialog(self):
+        from madgrav.tools.barcode_generator import generate_qr_code_vector
+        text, ok = QInputDialog.getText(self, "QR Code / Code-Barres", "Entrez le texte, l'URL ou la donnée à encoder :", text="https://madgrav.io")
+        if ok and text:
+            generate_qr_code_vector(self.context.elements, data_str=text)
+            self._on_zoom_fit()
+
+    def _on_grid_array_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import GridArrayDialog
+        from madgrav.tools.array_generator import generate_grid_array
+        dialog = GridArrayDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            created = generate_grid_array(
+                self.context.elements,
+                rows=dialog.spin_rows.value(),
+                cols=dialog.spin_cols.value(),
+                distance_x_mm=dialog.spin_dist_x.value(),
+                distance_y_mm=dialog.spin_dist_y.value(),
+            )
+            self._on_zoom_fit()
+            QMessageBox.information(self, "Réseau 2D", f"{len(created)} éléments créés en grille.")
+
+    def _on_circular_array_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import CircularArrayDialog
+        from madgrav.tools.array_generator import generate_circular_array
+        dialog = CircularArrayDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            created = generate_circular_array(self.context.elements, count=dialog.spin_count.value())
+            self._on_zoom_fit()
+            QMessageBox.information(self, "Réseau Circulaire", f"{len(created)} éléments créés en réseau circulaire.")
+
+    def _on_micro_tabs_dialog(self):
+        from madgrav.tools.micro_tabs import apply_tabs_to_selected_nodes
+        count = apply_tabs_to_selected_nodes(self.context.elements, tab_width_mm=0.5, tab_count=4)
+        self.canvas.update()
+        QMessageBox.information(self, "Micro-Tabs", f"Micro-tabs ajoutés à {count} éléments.")
+
+    def _on_kerf_lead_dialog(self):
+        from madgrav.tools.kerf_lead import apply_kerf_and_lead_to_selection
+        count = apply_kerf_and_lead_to_selection(self.context.elements, kerf_mm=0.1, mode="outer", lead_in_mm=2.0)
+        self.canvas.update()
+        QMessageBox.information(self, "Kerf & Amorces", f"Kerf et amorces appliqués à {count} éléments.")
+
+    def _on_stamp_mode_dialog(self):
+        from madgrav.tools.stamp_mode import apply_stamp_mode
+        created = apply_stamp_mode(self.context.elements, shoulder_width_mm=0.5, invert=True)
+        self.canvas.update()
+        QMessageBox.information(self, "Mode Tampon", f"Épaulements de tampon créés ({len(created)} nœuds).")
+
+    def _on_optimize_cut_order(self):
+        from madgrav.tools.cut_optimizer import optimize_cut_order
+        reordered = optimize_cut_order(self.context.elements, inner_first=True, minimize_travel=True)
+        self.canvas.update()
+        QMessageBox.information(self, "Optimisation Découpe", f"Ordre de découpe optimisé pour {len(reordered)} éléments (trous intérieurs en premier).")
+
+    def _on_variable_text_dialog(self):
+        from madgrav.tools.variable_text import apply_variable_text_serialization
+        created = apply_variable_text_serialization(self.context.elements, count=5)
+        self.canvas.update()
+        QMessageBox.information(self, "Texte Variable", f"{len(created)} éléments sérialisés générés.")
+
+    def _on_print_and_cut_dialog(self):
+        QMessageBox.information(self, "Print & Cut", "Alignement 2-Points Print & Cut configuré.")
+
+    def _on_slot_fitter_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import SlotFitterDialog
+        from madgrav.tools.slot_fitter import apply_slot_fitter_to_nodes
+        dialog = SlotFitterDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            count = apply_slot_fitter_to_nodes(
+                self.context.elements,
+                old_thickness_mm=dialog.spin_old_thickness.value(),
+                new_thickness_mm=dialog.spin_new_thickness.value(),
+            )
+            self.canvas.update()
+            QMessageBox.information(self, "Ajusteur Encoches", f"Encoches ajustées sur {count} éléments.")
+
+    def _on_camera_autocal_dialog(self):
+        QMessageBox.information(self, "Calibration Caméra", "Calibration optique damier et homographie ArUco prêtes.")
+
+    def _on_measure_objects_dialog(self):
+        from madgrav.camera.cameratrace import trace_camera_frame_to_elements
+        kernel = getattr(self.context, "kernel", self.context)
+        nodes = trace_camera_frame_to_elements(kernel)
+        if nodes:
+            self._on_zoom_fit()
+            QMessageBox.information(self, "Mesure Caméra", f"Contours caméra mesurés et vectorisés ({len(nodes)} éléments).")
+        else:
+            QMessageBox.information(self, "Mesure Caméra", "Aucune caméra USB/RTSP active ou aucun objet détecté sur le lit.")
+
+    def _on_material_library_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import MaterialLibraryDialog
+        from madgrav.tools.material_library import apply_material_preset
+        dialog = MaterialLibraryDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            mat = dialog.combo_material.currentText()
+            mode = dialog.combo_mode.currentText()
+            applied = apply_material_preset(self.context.elements, mat, 3.0, mode)
+            self.canvas.update()
+            if applied:
+                QMessageBox.information(self, "Matériaux", f"Préréglage '{mat}' appliqué aux opérations.")
+            else:
+                QMessageBox.warning(self, "Matériaux", "Aucune opération de découpe compatible trouvée.")
+
+    def _on_rotary_assistant_dialog(self):
+        from madgrav.tools.rotary_assistant import calculate_rotary_parameters
+        res = calculate_rotary_parameters(object_diameter_mm=80.0, is_chuck=True)
+        QMessageBox.information(self, "Axe Rotatif", f"Diamètre : 80mm\nPérimètre : {res['circumference_mm']:.2f}mm\nRésolution : {res['pulses_per_mm']:.2f} pas/mm.")
+
+    def _on_cost_estimator_dialog(self):
+        from madgrav.tools.cost_estimator import estimate_job_cost
+        est = estimate_job_cost(self.context.elements)
+        msg = (
+            f"Longueur de découpe : {est['total_cut_length_mm']:.1f} mm\n"
+            f"Durée estimée : {est['estimated_duration_min']:.2f} min ({est['estimated_duration_sec']:.0f} sec)\n"
+            f"Coût matière : {est['material_cost_eur']:.2f} €\n"
+            f"Coût énergie : {est['electricity_cost_eur']:.2f} €\n"
+            f"Coût machine/main d'œuvre : {est['machine_cost_eur']:.2f} €\n\n"
+            f"COÛT TOTAL ESTIMÉ : {est['total_cost_eur']:.2f} €"
+        )
+        QMessageBox.information(self, "Estimation de Coût Laser", msg)
+

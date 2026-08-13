@@ -129,7 +129,48 @@ def build_tool_icon(name: str, size: int = 22, color: str = "#E2E2E9"):
     elif name == "text":
         painter.drawLine(QPointF(5, 5), QPointF(19, 5))
         painter.drawLine(QPointF(12, 5), QPointF(12, 20))
+    elif name == "polygon":
+        import math
 
+        from PyQt6.QtGui import QPolygonF
+
+        cx, cy, r = 12.0, 12.0, 9.5
+        hexagon = QPolygonF(
+            [
+                QPointF(
+                    cx + r * math.cos(2 * math.pi * i / 6 - math.pi / 2),
+                    cy + r * math.sin(2 * math.pi * i / 6 - math.pi / 2),
+                )
+                for i in range(6)
+            ]
+        )
+        painter.drawPolygon(hexagon)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def build_emoji_icon(emoji: str, size: int = 26):
+    """Render a single emoji glyph into a crisp QIcon, for the
+    generator/production tool buttons (qt_main.py's Générateurs/
+    Traitements/Vision groups). A plain QPushButton(emoji) at a small
+    fixed font-size renders blurry/clipped on Windows -- drawing it once
+    into a properly-sized, antialiased pixmap (matching build_tool_icon's
+    approach for the main draw-tool row) is crisp at any DPI and lets the
+    button show a real text label alongside it via ToolButtonTextUnderIcon
+    instead of emoji-only with no visible label."""
+    from PyQt6.QtCore import QRectF, Qt
+    from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    font = QFont()
+    font.setPointSize(int(size * 0.62))
+    painter.setFont(font)
+    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, emoji)
     painter.end()
     return QIcon(pixmap)
 

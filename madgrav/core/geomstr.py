@@ -7885,6 +7885,11 @@ class Geomstr:
 
             last_point = None
 
+            def _to_c(pt):
+                if pt is None:
+                    return None
+                return complex(float(pt.x if hasattr(pt, "x") else pt.real), float(pt.y if hasattr(pt, "y") else pt.imag))
+
             # Process segments with optimized type checking
             for seg in path_segments:
                 seg_type = type(seg)
@@ -7900,7 +7905,7 @@ class Geomstr:
 
                 elif seg_type in (Line_type, Close_type):
                     if seg.start is not None and seg.end is not None:
-                        obj.line(complex(seg.start), complex(seg.end))
+                        obj.line(_to_c(seg.start), _to_c(seg.end))
 
                 elif seg_type is QuadraticBezier_type:
                     if (
@@ -7909,7 +7914,7 @@ class Geomstr:
                         and seg.control is not None
                     ):
                         obj.quad(
-                            complex(seg.start), complex(seg.control), complex(seg.end)
+                            _to_c(seg.start), _to_c(seg.control), _to_c(seg.end)
                         )
 
                 elif seg_type is CubicBezier_type:
@@ -7920,26 +7925,26 @@ class Geomstr:
                         and seg.control2 is not None
                     ):
                         obj.cubic(
-                            complex(seg.start),
-                            complex(seg.control1),
-                            complex(seg.control2),
-                            complex(seg.end),
+                            _to_c(seg.start),
+                            _to_c(seg.control1),
+                            _to_c(seg.control2),
+                            _to_c(seg.end),
                         )
 
                 elif seg_type is Arc_type:
                     if seg.start is not None and seg.end is not None:
                         if seg.is_circular():
                             obj.arc(
-                                complex(seg.start),
-                                complex(seg.point(0.5)),
-                                complex(seg.end),
+                                _to_c(seg.start),
+                                _to_c(seg.point(0.5)),
+                                _to_c(seg.end),
                             )
                         else:
                             # Optimized arc subdivision
                             quads = seg.as_quad_curves(4)
                             for q in quads:
                                 obj.quad(
-                                    complex(q.start), complex(q.control), complex(q.end)
+                                    _to_c(q.start), _to_c(q.control), _to_c(q.end)
                                 )
 
                 last_point = seg.end
