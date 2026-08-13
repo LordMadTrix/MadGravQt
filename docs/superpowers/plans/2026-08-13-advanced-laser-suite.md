@@ -23,9 +23,9 @@
 **Interfaces:**
 - Produces: `nest_elements(elements, sheet_width_mm, sheet_height_mm, margin_mm=2.0, rotation_steps=4)`
 
-- [ ] **Step 1: Write test for polygon nesting**
-- [ ] **Step 2: Implement polygon nesting algorithm in `madgrav/tools/nesting.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for polygon nesting**
+- [x] **Step 2: Implement polygon nesting algorithm in `madgrav/tools/nesting.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -38,9 +38,9 @@
 **Interfaces:**
 - Produces: `generate_3d_laser_relief(image_np, max_power_percent=100.0, min_power_percent=10.0, invert=False, passes=1)`
 
-- [ ] **Step 1: Write test for 3D grayscale laser relief generation**
-- [ ] **Step 2: Implement 3D laser relief raster engine in `madgrav/tools/relief_3d.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for 3D grayscale laser relief generation**
+- [x] **Step 2: Implement 3D laser relief raster engine in `madgrav/tools/relief_3d.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -53,9 +53,9 @@
 **Interfaces:**
 - Produces: `apply_galvo_hatch(path, hatch_angle_deg=45.0, line_spacing_mm=0.1, mode="cross", wobble_frequency=50.0, wobble_amplitude_mm=0.2)`
 
-- [ ] **Step 1: Write test for galvo hatch line & wobble pattern generation**
-- [ ] **Step 2: Implement galvo hatching in `madgrav/tools/galvo_hatching.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for galvo hatch line & wobble pattern generation**
+- [x] **Step 2: Implement galvo hatching in `madgrav/tools/galvo_hatching.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -68,6 +68,7 @@
 **Interfaces:**
 - Produces: `vectorize_bitmap_to_bezier(image_np, threshold=128, corner_threshold_deg=45.0, error_tolerance_mm=0.1)`
 
-- [ ] **Step 1: Write test for smart vectorization and Bezier curve fitting**
-- [ ] **Step 2: Implement smart vectorizer in `madgrav/tools/smart_vectorize.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for smart vectorization and Bezier curve fitting**
+- [x] **Step 2: Implement smart vectorizer in `madgrav/tools/smart_vectorize.py`**
+- [x] **Step 3: Run unit tests**
+
