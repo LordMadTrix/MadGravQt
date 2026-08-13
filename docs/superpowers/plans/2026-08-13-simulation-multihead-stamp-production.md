@@ -23,9 +23,9 @@
 **Interfaces:**
 - Produces: `simulate_laser_path_3d(gcode_text_or_ops, travel_speed_mm_s=200.0, cut_speed_mm_s=20.0)`
 
-- [ ] **Step 1: Write test for 3D trajectory calculation & G-Code parsing**
-- [ ] **Step 2: Implement 3D simulation engine in `madgrav/tools/gcode_previewer.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for 3D trajectory calculation & G-Code parsing**
+- [x] **Step 2: Implement 3D simulation engine in `madgrav/tools/gcode_previewer.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -38,9 +38,9 @@
 **Interfaces:**
 - Produces: `calculate_dual_head_offset(test_cut_coords_head1, test_cut_coords_head2)`
 
-- [ ] **Step 1: Write test for dual-head laser offset calculation**
-- [ ] **Step 2: Implement dual-head wizard module in `madgrav/tools/multi_head_wizard.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for dual-head laser offset calculation**
+- [x] **Step 2: Implement dual-head wizard module in `madgrav/tools/multi_head_wizard.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -53,9 +53,9 @@
 **Interfaces:**
 - Produces: `generate_rubber_stamp_profile(path, shoulder_width_mm=0.5, ramp_angle_deg=45.0)`, `generate_jigsaw_puzzle_grid(width_mm, height_mm, rows=4, cols=4, tab_size_percent=20.0)`
 
-- [ ] **Step 1: Write test for rubber stamp shoulder ramp & jigsaw puzzle generation**
-- [ ] **Step 2: Implement stamp & puzzle module in `madgrav/tools/stamp_puzzle_generator.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for rubber stamp shoulder ramp & jigsaw puzzle generation**
+- [x] **Step 2: Implement stamp & puzzle module in `madgrav/tools/stamp_puzzle_generator.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -68,6 +68,7 @@
 **Interfaces:**
 - Produces: `ProductionQueueManager` class (`add_job`, `get_next_job`, `mark_job_completed`, `lookup_job_by_barcode`, `export_production_summary`)
 
-- [ ] **Step 1: Write test for production job queue, barcode lookup & metrics summary**
-- [ ] **Step 2: Implement `ProductionQueueManager` in `madgrav/tools/production_queue.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for production job queue, barcode lookup & metrics summary**
+- [x] **Step 2: Implement `ProductionQueueManager` in `madgrav/tools/production_queue.py`**
+- [x] **Step 3: Run unit tests**
+
