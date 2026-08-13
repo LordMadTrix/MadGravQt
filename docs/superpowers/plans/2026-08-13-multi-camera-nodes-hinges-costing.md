@@ -23,9 +23,9 @@
 **Interfaces:**
 - Produces: `stitch_multi_camera_views(camera_images, homography_matrices, target_bed_width_mm, target_bed_height_mm)`
 
-- [ ] **Step 1: Write test for multi-camera perspective warping & stitching**
-- [ ] **Step 2: Implement multi-camera stitching in `madgrav/camera/stitching.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for multi-camera perspective warping & stitching**
+- [x] **Step 2: Implement multi-camera stitching in `madgrav/camera/stitching.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -38,9 +38,9 @@
 **Interfaces:**
 - Produces: `VectorNodeEditor` class (`extract_nodes_and_handles`, `move_node`, `move_handle`, `insert_node`, `delete_node`, `toggle_smooth_corner`)
 
-- [ ] **Step 1: Write test for Bezier node extraction, move, insert, and delete**
-- [ ] **Step 2: Implement `VectorNodeEditor` in `madgrav/tools/node_editor.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for Bezier node extraction, move, insert, and delete**
+- [x] **Step 2: Implement `VectorNodeEditor` in `madgrav/tools/node_editor.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -53,9 +53,9 @@
 **Interfaces:**
 - Produces: `generate_living_hinge(width_mm, height_mm, pattern="straight", cut_length_mm=10.0, gap_length_mm=2.0, line_spacing_mm=1.5)`
 
-- [ ] **Step 1: Write test for living hinge flex pattern vector generation**
-- [ ] **Step 2: Implement flex hinge generator in `madgrav/tools/flex_hinge.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for living hinge flex pattern vector generation**
+- [x] **Step 2: Implement flex hinge generator in `madgrav/tools/flex_hinge.py`**
+- [x] **Step 3: Run unit tests**
 
 ---
 
@@ -68,6 +68,7 @@
 **Interfaces:**
 - Produces: `generate_job_quote(elements, material_cost_per_m2=15.0, machine_rate_per_hour=45.0, setup_fee=5.0, margin_percent=20.0)`
 
-- [ ] **Step 1: Write test for job cost calculation and CSV/dict quote output**
-- [ ] **Step 2: Implement job costing module in `madgrav/tools/cost_quote.py`**
-- [ ] **Step 3: Run unit tests**
+- [x] **Step 1: Write test for job cost calculation and CSV/dict quote output**
+- [x] **Step 2: Implement job costing module in `madgrav/tools/cost_quote.py`**
+- [x] **Step 3: Run unit tests**
+
