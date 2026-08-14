@@ -140,6 +140,7 @@ dmypy.json
 
 # Others
 *.bat
+!Lancer_MadGravQt.bat
 MadGrav-*.txt
 
 # Sourcery settings
