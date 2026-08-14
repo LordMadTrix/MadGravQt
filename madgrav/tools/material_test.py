@@ -23,6 +23,12 @@ def generate_material_test(
     start_x_mm=10.0,
     start_y_mm=10.0,
     include_text=True,
+    rows=None,
+    cols=None,
+    min_speed_mm_s=None,
+    max_speed_mm_s=None,
+    min_power_ratio=None,
+    max_power_ratio=None,
 ):
     """
     Generate a material test matrix grid in elements_service.
@@ -43,6 +49,19 @@ def generate_material_test(
     :param include_text: Whether to generate text labels for speed and power
     """
     from madgrav.core.units import UNITS_PER_MM
+
+    if rows is not None:
+        power_steps = rows
+    if cols is not None:
+        speed_steps = cols
+    if min_speed_mm_s is not None:
+        min_speed = min_speed_mm_s
+    if max_speed_mm_s is not None:
+        max_speed = max_speed_mm_s
+    if min_power_ratio is not None:
+        min_power = min_power_ratio
+    if max_power_ratio is not None:
+        max_power = max_power_ratio
 
     speeds = [
         min_speed + (max_speed - min_speed) * i / max(1, speed_steps - 1)

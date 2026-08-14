@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
+    QWidget,
 )
 
 # Minimum drag size (mm) before a rect/ellipse/line draw gesture is
@@ -64,12 +65,16 @@ class MadGravQtCanvas(QGraphicsView):
         self.bed_height = 200.0
         self._sync_bed_from_device()
 
-        # Colors
+        # Colors -- match THEME_PALETTES["dark"] in qt_theme.py (this is
+        # just the pre-set_theme() default so a canvas built before the
+        # main window's own _theme_name is known still looks right).
         self.bg_color = QColor("#14141A")
         self.bed_color = QColor("#1C1C26")
         self.grid_primary_color = QColor("#2E2E40")
         self.grid_secondary_color = QColor("#222230")
         self.border_color = QColor("#0A84FF")
+        self.ruler_color = QColor("#A0A0B0")
+        self.watermark_rgb = (10, 132, 255)
         self._is_dark_theme = True
 
         self.zoom_factor = 1.15
@@ -78,6 +83,11 @@ class MadGravQtCanvas(QGraphicsView):
 
         self._element_items = []
         self._item_to_node = {}
+        # Items styled as "emphasized" as of the last refresh_selection_highlight()/
+        # render_elements() call -- lets refresh_selection_highlight() only
+        # restyle the items whose emphasis actually changed (usually 1-2)
+        # instead of every rendered item, on every selection click.
+        self._prev_emphasized_items = set()
 
         # Draw-tool state (rectangle/ellipse/line rubber-band creation).
         self.draw_mode = None  # None | "rect" | "ellipse" | "line" | "text"
@@ -89,6 +99,12 @@ class MadGravQtCanvas(QGraphicsView):
         # Set from the tool panel's spinbox (qt_main.py); 0 = sharp
         # corners, matching every rectangle drawn before this feature.
         self.rect_corner_radius_mm = 0.0
+
+        # Camera Overlay
+        self.camera_overlay_pixmap = None
+        self.camera_overlay_opacity = 0.5
+        self.camera_overlay_visible = False
+        self.is_opengl_enabled = False
 
         # Rubber-band multi-selection state (Selection tool, drag on
         # empty space).
@@ -123,6 +139,44 @@ class MadGravQtCanvas(QGraphicsView):
         self.init_scene()
         self.render_elements()
 
+    def enable_opengl(self, enabled: bool) -> bool:
+        self.is_opengl_enabled = bool(enabled)
+        if self.is_opengl_enabled:
+            try:
+                from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+                self.setViewport(QOpenGLWidget())
+                self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+            except Exception:
+                self.setViewport(QWidget())
+                self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
+        else:
+            self.setViewport(QWidget())
+            self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
+        self.scene.update()
+        self.viewport().update()
+        return self.is_opengl_enabled
+
+    def set_camera_overlay(self, pixmap, opacity: float = 0.5, visible: bool = True):
+        self.camera_overlay_pixmap = pixmap
+        self.camera_overlay_opacity = max(0.0, min(1.0, float(opacity)))
+        self.camera_overlay_visible = visible
+        self.scene.update()
+        self.viewport().update()
+
+    def set_camera_opacity(self, opacity: float):
+        self.camera_overlay_opacity = max(0.0, min(1.0, float(opacity)))
+        self.scene.update()
+        self.viewport().update()
+
+    def toggle_camera_overlay(self, visible=None) -> bool:
+        if visible is None:
+            self.camera_overlay_visible = not self.camera_overlay_visible
+        else:
+            self.camera_overlay_visible = bool(visible)
+        self.scene.update()
+        self.viewport().update()
+        return self.camera_overlay_visible
+
     def set_draw_mode(self, mode):
         """Switch the active draw tool. mode is None (selection), "rect",
         "ellipse", or "line"; call with None to cancel back to plain
@@ -155,6 +209,10 @@ class MadGravQtCanvas(QGraphicsView):
         self._handle_items = {}
         self._active_handle = None
         self._handle_preview_item = None
+        # Same reasoning again -- these reference items scene.clear() just
+        # destroyed; a stale entry here would make refresh_selection_highlight()
+        # try to restyle an already-deleted QGraphicsItem.
+        self._prev_emphasized_items = set()
         self.scene.setBackgroundBrush(QBrush(self.bg_color))
 
         # Add Bed rectangle (transparent so it doesn't cover drawBackground's grid & watermark)
@@ -187,26 +245,41 @@ class MadGravQtCanvas(QGraphicsView):
             Qt.AspectRatioMode.KeepAspectRatio,
         )
 
-    def set_theme(self, dark: bool):
-        """Swap the bed/grid colors the QSS stylesheet can't reach (this
-        widget paints its background/grid directly in drawBackground()
-        instead of via CSS, since QGraphicsView content isn't styleable
-        that way). Called by MadGravQtMainWindow's theme toggle alongside
-        setStyleSheet() so the canvas doesn't stay dark while the rest of
-        the window goes light, or vice versa."""
-        self._is_dark_theme = dark
-        if dark:
-            self.bg_color = QColor("#14141A")
-            self.bed_color = QColor("#1C1C26")
-            self.grid_primary_color = QColor("#2E2E40")
-            self.grid_secondary_color = QColor("#222230")
-        else:
-            self.bg_color = QColor("#E8E8ED")
-            self.bed_color = QColor("#FFFFFF")
-            self.grid_primary_color = QColor("#C4C4CE")
-            self.grid_secondary_color = QColor("#E0E0E6")
-        # border_color (#0A84FF) is the shared accent blue -- unchanged in
-        # both themes, so it isn't reassigned here.
+    def set_theme(self, palette):
+        """Swap the bed/grid/ruler colors the QSS stylesheet can't reach
+        (this widget paints its background/grid directly in
+        drawBackground() instead of via CSS, since QGraphicsView content
+        isn't styleable that way). Called by MadGravQtMainWindow's
+        _on_select_theme() alongside setStyleSheet() so the canvas
+        doesn't stay on the old theme while the rest of the window
+        switches.
+
+        @param palette: one of qt_theme.THEME_PALETTES' dicts (not
+            imported directly here to keep this widget decoupled from
+            qt_theme.py -- the caller already has it in hand). A bare
+            bool is also accepted for backward compatibility with older
+            call sites/tests written before this became a 5-theme
+            picker (True/False map to the original dark/light values).
+        """
+        if isinstance(palette, bool):
+            palette = {
+                "is_dark": palette,
+                "canvas_bg": "#14141A" if palette else "#E8E8ED",
+                "canvas_bed": "#1C1C26" if palette else "#FFFFFF",
+                "canvas_grid_primary": "#2E2E40" if palette else "#C4C4CE",
+                "canvas_grid_secondary": "#222230" if palette else "#E0E0E6",
+                "canvas_border": "#0A84FF",
+                "canvas_ruler": "#A0A0B0" if palette else "#505060",
+                "watermark_rgb": (10, 132, 255) if palette else (0, 102, 204),
+            }
+        self._is_dark_theme = palette["is_dark"]
+        self.bg_color = QColor(palette["canvas_bg"])
+        self.bed_color = QColor(palette["canvas_bed"])
+        self.grid_primary_color = QColor(palette["canvas_grid_primary"])
+        self.grid_secondary_color = QColor(palette["canvas_grid_secondary"])
+        self.border_color = QColor(palette["canvas_border"])
+        self.ruler_color = QColor(palette["canvas_ruler"])
+        self.watermark_rgb = palette["watermark_rgb"]
         self.init_scene()
         self.render_elements()
 
@@ -304,6 +377,14 @@ class MadGravQtCanvas(QGraphicsView):
             item.setZValue(11 if getattr(node, "emphasized", False) else 10)
             self._element_items.append(item)
             self._item_to_node[item] = node
+        # Every item above was just styled correctly for its CURRENT
+        # emphasis state -- seed the cache so a refresh_selection_highlight()
+        # right after this rebuild only restyles items whose selection
+        # changes AFTER this point, not all of them again.
+        self._prev_emphasized_items = {
+            item for item, node in self._item_to_node.items()
+            if getattr(node, "emphasized", False)
+        }
         self._update_selection_handles()
 
     def _movable_selected_items(self):
@@ -618,12 +699,28 @@ class MadGravQtCanvas(QGraphicsView):
         select all, deselect all), which don't need the full
         render_elements() geometry rebuild (measured ~110ms for 300
         elements; a selection change alone should be near-instant).
+
+        Only the items whose emphasis actually flipped (now emphasized,
+        or was emphasized before this call) get restyled -- for a normal
+        single-item click that's 1-2 items, not every rendered item, since
+        every OTHER item's style is by definition unchanged: this method
+        is only ever called for a pure selection change (see docstring
+        above), so a node that was never emphasized and still isn't has
+        nothing else that could have altered its pen/brush/z-value.
         """
-        for item, node in self._item_to_node.items():
+        curr_emphasized_items = {
+            item for item, node in self._item_to_node.items()
+            if getattr(node, "emphasized", False)
+        }
+        for item in curr_emphasized_items | self._prev_emphasized_items:
+            node = self._item_to_node.get(item)
+            if node is None:
+                continue
             pen, brush = self._style_for_node(node)
             item.setPen(pen)
             item.setBrush(brush)
             item.setZValue(11 if getattr(node, "emphasized", False) else 10)
+        self._prev_emphasized_items = curr_emphasized_items
         self._update_selection_handles()
 
     def _style_for_node(self, node):
@@ -673,6 +770,13 @@ class MadGravQtCanvas(QGraphicsView):
         bed_rect = QRectF(0, 0, self.bed_width, self.bed_height)
         painter.fillRect(bed_rect, self.bed_color)
 
+        # Draw Camera Overlay if active
+        if self.camera_overlay_visible and self.camera_overlay_pixmap and not self.camera_overlay_pixmap.isNull():
+            painter.save()
+            painter.setOpacity(self.camera_overlay_opacity)
+            painter.drawPixmap(bed_rect.toRect(), self.camera_overlay_pixmap)
+            painter.restore()
+
         # Only iterate grid lines that actually fall within the exposed
         # scene rect -- looping the full bed extent on every repaint was
         # wasted work when zoomed in on a large bed (most of those lines
@@ -703,7 +807,8 @@ class MadGravQtCanvas(QGraphicsView):
         painter.drawRect(bed_rect)
 
         # Center Bed Measurements Watermark Overlay
-        painter.setPen(QPen(QColor(10, 132, 255, 110) if self._is_dark_theme else QColor(0, 102, 204, 110)))
+        wr, wg, wb = self.watermark_rgb
+        painter.setPen(QPen(QColor(wr, wg, wb, 110)))
         font = painter.font()
         font.setPointSize(13)
         font.setBold(True)
@@ -712,7 +817,7 @@ class MadGravQtCanvas(QGraphicsView):
         painter.drawText(bed_rect, Qt.AlignmentFlag.AlignCenter, dim_text)
 
         # LightBurn-Style Graduated Rulers (X Top Ruler & Y Left Ruler)
-        ruler_pen = QPen(QColor("#A0A0B0") if self._is_dark_theme else QColor("#505060"), 0.8)
+        ruler_pen = QPen(self.ruler_color, 0.8)
         painter.setPen(ruler_pen)
         ruler_font = painter.font()
         # drawBackground() runs with the painter already scaled by the
@@ -1231,7 +1336,14 @@ class MadGravQtCanvas(QGraphicsView):
         """Fine-move the selection by arrow keys -- same 'translate' console
         command the classic wx UI's arrow-key bindings use."""
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        # NOT elements.first_emphasized is None -- that becomes None
+        # whenever MULTIPLE elements are emphasized with no prior single
+        # selection (elements.py: "it makes no sense to define a 'first'
+        # here, as all are equal"), e.g. right after a rubber-band
+        # multi-select. translate/delete apply to the WHOLE selection, so
+        # gating on first_emphasized silently broke arrow-key nudge and
+        # the Delete key for exactly that (very common) selection style.
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         self.context.console(f"translate {dx_mm}mm {dy_mm}mm\n")
         # Fast path: translate() only moves the node, it doesn't change its
@@ -1249,7 +1361,14 @@ class MadGravQtCanvas(QGraphicsView):
         """Delete the selected element(s) -- same 'element delete' console
         command the classic wx UI's Delete key runs (madgrav/core/bindalias.py)."""
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        # NOT elements.first_emphasized is None -- that becomes None
+        # whenever MULTIPLE elements are emphasized with no prior single
+        # selection (elements.py: "it makes no sense to define a 'first'
+        # here, as all are equal"), e.g. right after a rubber-band
+        # multi-select. translate/delete apply to the WHOLE selection, so
+        # gating on first_emphasized silently broke arrow-key nudge and
+        # the Delete key for exactly that (very common) selection style.
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         deleted_nodes = set(elements.elems(emphasized=True))
         self.context.console("element delete\n")

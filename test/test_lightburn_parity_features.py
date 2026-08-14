@@ -79,16 +79,52 @@ class TestLightBurnParityFeatures(unittest.TestCase):
         # 2x3 grid = 6 total cells, so 5 duplicates created
         self.assertEqual(len(new_nodes), 5)
 
+    def test_grid_array_copy_bounds_reflect_the_translation(self):
+        # Node.bounds is cached (_bounds_dirty flag, node.py:402-414);
+        # copy.copy() is a SHALLOW copy, so a copy made from an original
+        # whose .bounds was already accessed (very normal -- e.g. the
+        # canvas render loop reads it) inherits that cached, now-stale
+        # tuple unless something calls .modified()/.altered() on it after
+        # the matrix translation. Force the cache here the same way real
+        # usage would, then check the copy reports its OWN position.
+        path = Path()
+        path.move(complex(0, 0))
+        path.line(complex(1000, 0))
+        path.line(complex(1000, 1000))
+        path.line(complex(0, 1000))
+        path.closed()
+
+        rect_node = self.elements.elem_branch.add(type="elem path", path=path)
+        rect_node.emphasized = True
+        original_bounds = rect_node.bounds  # forces caching
+
+        new_nodes = generate_grid_array(
+            self.elements,
+            nodes=[rect_node],
+            rows=1,
+            cols=2,
+            distance_x_mm=5.0,
+            distance_y_mm=0.0,
+        )
+        self.assertEqual(len(new_nodes), 1)
+        copy_bounds = new_nodes[0].bounds
+        self.assertNotEqual(
+            copy_bounds, original_bounds,
+            "array copy's bounds must reflect its own translated position, not the original's cached bounds",
+        )
+        self.assertGreater(copy_bounds[0], original_bounds[0])
+
     def test_circular_array_generator(self):
         """Test Polar Circular Array duplication."""
         path = Path()
-        path.move(1000, 0)
-        path.line(1200, 0)
-        path.line(1200, 200)
-        path.line(1000, 200)
+        path.move(complex(1000, 0))
+        path.line(complex(1200, 0))
+        path.line(complex(1200, 200))
+        path.line(complex(1000, 200))
         path.closed()
 
         node = self.elements.elem_branch.add(type="elem path", path=path)
+        original_bounds = node.bounds  # forces caching, same as the grid-array test above
 
         new_nodes = generate_circular_array(
             self.elements,
@@ -100,6 +136,11 @@ class TestLightBurnParityFeatures(unittest.TestCase):
         )
 
         self.assertEqual(len(new_nodes), 5)
+        for copy_node in new_nodes:
+            self.assertNotEqual(
+                copy_node.bounds, original_bounds,
+                "rotated copy's bounds must reflect its own position, not the original's cached bounds",
+            )
 
     def test_micro_tabs_insertion(self):
         """Test micro-tabs (hold bridge gaps) insertion along vector path."""

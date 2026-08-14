@@ -1,3 +1,10 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .context import Context
+
+
 class Module:
     """
     Modules are a generic lifecycle object. These are registered in the kernel as modules and when open() is called for

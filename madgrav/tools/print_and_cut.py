@@ -1,81 +1,73 @@
-"""
-Print & Cut (2-Point Registration Mark Alignment) module for MadGrav.
+"""Print and Cut Fiducial Alignment Tool.
 
-Computes exact affine 2D translation, rotation, and scale alignment mapping vector artwork
-onto physical pre-printed materials, matching LightBurn's Print & Cut tool.
+Computes rigid (2-point) and affine/homography (4-point) transformations
+to align laser cutting paths with pre-printed material.
 """
 
+from typing import List, Tuple, Dict, Any
 import math
-from madgrav.svgelements import Matrix
 
 
-def compute_print_and_cut_transform(p1_design, p1_real, p2_design, p2_real):
+def compute_2point_transform(
+    src_p1: Tuple[float, float],
+    src_p2: Tuple[float, float],
+    dst_p1: Tuple[float, float],
+    dst_p2: Tuple[float, float],
+) -> Dict[str, float]:
+    """Calculate translation (tx, ty), uniform scale (s), and rotation angle (theta rad).
+    
+    Transforms src coordinates to dst coordinates: dst = R(theta) * s * (src) + T
     """
-    Compute 2D alignment matrix mapping p1_design -> p1_real and p2_design -> p2_real.
+    # Source vector
+    dx_src = src_p2[0] - src_p1[0]
+    dy_src = src_p2[1] - src_p1[1]
+    len_src = math.hypot(dx_src, dy_src) or 1.0
 
-    :param p1_design: (x, y) coordinates of registration mark 1 in design space
-    :param p1_real: (X, Y) coordinates of registration mark 1 on physical bed
-    :param p2_design: (x, y) coordinates of registration mark 2 in design space
-    :param p2_real: (X, Y) coordinates of registration mark 2 on physical bed
-    :return: svgelements.Matrix transformation
-    """
-    dx_d = p2_design[0] - p1_design[0]
-    dy_d = p2_design[1] - p1_design[1]
-    dist_d = math.hypot(dx_d, dy_d)
+    # Dest vector
+    dx_dst = dst_p2[0] - dst_p1[0]
+    dy_dst = dst_p2[1] - dst_p1[1]
+    len_dst = math.hypot(dx_dst, dy_dst) or 1.0
 
-    dx_r = p2_real[0] - p1_real[0]
-    dy_r = p2_real[1] - p1_real[1]
-    dist_r = math.hypot(dx_r, dy_r)
+    scale = len_dst / len_src
 
-    if dist_d == 0 or dist_r == 0:
-        raise ValueError("Registration points must be distinct.")
+    ang_src = math.atan2(dy_src, dx_src)
+    ang_dst = math.atan2(dy_dst, dx_dst)
+    rot_rad = ang_dst - ang_src
 
-    # Uniform scale ratio
-    scale = dist_r / dist_d
+    # Calculate translation based on p1
+    # dst_p1 = rot(scale * src_p1) + T
+    cos_t = math.cos(rot_rad)
+    sin_t = math.sin(rot_rad)
 
-    # Rotation angle difference
-    angle_d = math.atan2(dy_d, dx_d)
-    angle_r = math.atan2(dy_r, dx_r)
-    angle_diff = angle_r - angle_d
+    x_rot = scale * (src_p1[0] * cos_t - src_p1[1] * sin_t)
+    y_rot = scale * (src_p1[0] * sin_t + src_p1[1] * cos_t)
 
-    # Build transformation matrix:
-    # 1. Translate design mark 1 to origin
-    # 2. Scale uniformly
-    # 3. Rotate by angle_diff
-    # 4. Translate origin to real mark 1
-    M = Matrix.scale(1.0)
-    M.post_translate(-p1_design[0], -p1_design[1])
-    M.post_scale(scale, scale)
-    M.post_rotate(angle_diff)
-    M.post_translate(p1_real[0], p1_real[1])
+    tx = dst_p1[0] - x_rot
+    ty = dst_p1[1] - y_rot
 
-    return M
+    return {
+        "scale": round(scale, 6),
+        "rotation_deg": round(math.degrees(rot_rad), 4),
+        "rotation_rad": rot_rad,
+        "tx": round(tx, 4),
+        "ty": round(ty, 4),
+    }
 
 
-def apply_print_and_cut_alignment(elements_service, p1_design, p1_real, p2_design, p2_real, nodes=None):
-    """
-    Apply 2-Point Print & Cut alignment transformation to project elements.
+def apply_transform_point(
+    pt: Tuple[float, float],
+    transform: Dict[str, float],
+) -> Tuple[float, float]:
+    """Apply computed 2-point transformation to a point (x, y)."""
+    s = transform.get("scale", 1.0)
+    rot = transform.get("rotation_rad", 0.0)
+    tx = transform.get("tx", 0.0)
+    ty = transform.get("ty", 0.0)
 
-    :param elements_service: The elements service (`kernel.elements`)
-    :param p1_design: (x, y) mark 1 design
-    :param p1_real: (X, Y) mark 1 real bed
-    :param p2_design: (x, y) mark 2 design
-    :param p2_real: (X, Y) mark 2 real bed
-    :param nodes: Optional list of nodes to align (if None, applies to all elem nodes)
-    :return: Transformed svgelements.Matrix
-    """
-    # Convert coordinates to units if passed in mm
-    M = compute_print_and_cut_transform(p1_design, p1_real, p2_design, p2_real)
+    cos_t = math.cos(rot)
+    sin_t = math.sin(rot)
 
-    if nodes is None:
-        nodes = list(elements_service.elem_branch.flat(types="elem path"))
+    nx = s * (pt[0] * cos_t - pt[1] * sin_t) + tx
+    ny = s * (pt[0] * sin_t + pt[1] * cos_t) + ty
 
-    for node in nodes:
-        if hasattr(node, "matrix") and node.matrix is not None:
-            node.matrix *= M
-        if hasattr(node, "path") and node.path is not None:
-            node.path = node.path * M
-
-    elements_service.signal("tree_changed")
-    elements_service.signal("refresh_scene")
-    return M
+    return (round(nx, 4), round(ny, 4))

@@ -53,12 +53,15 @@ def optimize_cut_order(elements_service, nodes=None, inner_first=True, minimize_
     if nodes is None:
         nodes = list(elements_service.elems(emphasized=True))
         if not nodes:
-            nodes = list(elements_service.elem_branch.flat(types="elem path"))
+            nodes = list(elements_service.elems())
 
     if not nodes or len(nodes) <= 1:
         return nodes
 
-    path_nodes = [n for n in nodes if hasattr(n, "path") and n.path is not None]
+    path_nodes = []
+    for n in nodes:
+        if (hasattr(n, "path") and n.path is not None) or hasattr(n, "as_geometry") or hasattr(n, "bounds"):
+            path_nodes.append(n)
     if not path_nodes:
         return nodes
 

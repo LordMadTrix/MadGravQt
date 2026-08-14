@@ -1,14 +1,77 @@
-"""
-Variable Text & CSV Serializer module for MadGrav.
-
-Allows dynamic text tag substitution ({serial}, {date}, {time}, {csv:column})
-and batch production serialization, matching LightBurn's Variable Text feature.
-"""
-
+import csv
 import datetime
+import os
 import re
 from copy import copy
 from madgrav.svgelements import Matrix
+
+
+def parse_csv_or_excel(filepath: str) -> list[dict[str, str]]:
+    """Parse CSV or tabular file into a list of record dicts."""
+    if not filepath or not os.path.exists(filepath):
+        return []
+    records = []
+    try:
+        with open(filepath, "r", encoding="utf-8-sig") as f:
+            sample = f.read(2048)
+            f.seek(0)
+            delimiter = ","
+            try:
+                dialect = csv.Sniffer().sniff(sample)
+                delimiter = dialect.delimiter
+            except Exception:
+                if ";" in sample:
+                    delimiter = ";"
+                elif "\t" in sample:
+                    delimiter = "\t"
+            reader = csv.DictReader(f, delimiter=delimiter)
+            for row in reader:
+                clean_row = {k.strip(): str(v).strip() for k, v in row.items() if k is not None}
+                records.append(clean_row)
+    except Exception:
+        pass
+    return records
+
+
+def generate_merged_variable_layout(
+    elements_service,
+    records,
+    template_pattern="{Nom}",
+    columns=3,
+    spacing_x_mm=50.0,
+    spacing_y_mm=20.0,
+    start_x_mm=10.0,
+    start_y_mm=10.0,
+):
+    """Generates a grid of merged text nodes based on records."""
+    from madgrav.core.units import UNITS_PER_MM
+    from madgrav.svgelements import Text
+    from madgrav.core.node.elem_text import TextNode
+
+    created_nodes = []
+    cols = max(1, int(columns))
+    for i, record in enumerate(records):
+        col = i % cols
+        row = i // cols
+        pos_x = (start_x_mm + col * spacing_x_mm) * UNITS_PER_MM
+        pos_y = (start_y_mm + row * spacing_y_mm) * UNITS_PER_MM
+
+        text_val = template_pattern
+        for k, v in record.items():
+            text_val = text_val.replace(f"{{{k}}}", str(v))
+        text_val = substitute_variable_text(text_val, index=i, csv_row=record)
+
+        node = TextNode(text=Text(text_val, x=pos_x, y=pos_y))
+        if hasattr(elements_service, "elem_branch") and elements_service.elem_branch is not None:
+            elements_service.elem_branch.add_node(node)
+        elif hasattr(elements_service, "add_node"):
+            elements_service.add_node(node)
+        created_nodes.append(node)
+
+    if hasattr(elements_service, "signal"):
+        elements_service.signal("tree_changed")
+        elements_service.signal("refresh_scene")
+    return created_nodes
 
 
 def substitute_variable_text(template_str, index=0, csv_row=None):
@@ -96,7 +159,7 @@ def apply_variable_text_serialization(
     if nodes is None:
         nodes = [n for n in elements_service.elems(emphasized=True) if getattr(n, "type", "") == "elem text"]
         if not nodes:
-            nodes = [n for n in elements_service.elem_branch.flat(types="elem text")]
+            nodes = [n for n in elements_service.elems(types="elem text")]
 
     if not nodes:
         return []
@@ -109,7 +172,6 @@ def apply_variable_text_serialization(
 
         dx = i * offset_x_mm * UNITS_PER_MM
         dy = i * offset_y_mm * UNITS_PER_MM
-        M = Matrix.translate(dx, dy)
 
         for text_node in nodes:
             orig_text = getattr(text_node, "text", "")
@@ -117,10 +179,18 @@ def apply_variable_text_serialization(
 
             copy_node = copy(text_node)
             copy_node.text = new_text
-            if hasattr(copy_node, "matrix") and copy_node.matrix is not None:
-                copy_node.matrix *= M
+            if getattr(copy_node, "matrix", None) is not None:
+                copy_node.matrix = Matrix(copy_node.matrix)
+                copy_node.matrix.post_translate(dx, dy)
+            else:
+                copy_node.matrix = Matrix.translate(dx, dy)
 
-            text_node.parent.add_node(copy_node)
+            copy_node.altered()
+            parent = getattr(text_node, "parent", None)
+            if parent is not None:
+                parent.add_node(copy_node)
+            else:
+                elements_service.elem_branch.add_node(copy_node)
             created_nodes.append(copy_node)
 
     elements_service.signal("tree_changed")

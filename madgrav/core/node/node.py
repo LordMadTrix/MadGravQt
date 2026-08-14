@@ -164,6 +164,21 @@ class Node:
         obj._parent = None
         obj._root = None
 
+        # matrix is a mutable Matrix object whose own post_translate()/
+        # post_scale()/post_rotate()/*= all mutate self in place (confirmed
+        # empirically) -- without this, obj.matrix is the SAME object as
+        # self.matrix, so any later in-place transform of one silently
+        # corrupts the other too. This is the root cause of a confirmed
+        # bug where Ctrl+Z after Align/Mirror/Distribute/Rotate 90 left
+        # elements at their transformed position: undo's own backup_tree()
+        # snapshot (which goes through this exact __copy__) shared the
+        # live node's matrix, so transforming the live node after the
+        # snapshot was taken silently altered the "before" state it was
+        # supposed to preserve.
+        matrix = obj.__dict__.get("matrix")
+        if matrix is not None:
+            obj.matrix = copy(matrix)
+
         # Deep-copy the Parameters.settings dict so property setters on the
         # copy don't mutate the original's values (speed, power, etc.)
         settings = obj.__dict__.get("settings")

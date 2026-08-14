@@ -8,7 +8,7 @@ import re
 import time
 
 from PyQt6.QtCore import QSettings, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -43,9 +43,16 @@ from PyQt6.QtWidgets import (
 )
 
 from madgrav.qt.qt_canvas import MadGravQtCanvas
+from madgrav.qt.qt_document import DocumentTab
 from madgrav.qt.qt_theme import (
+    COLOR_ACCENT,
+    COLOR_DANGER,
+    COLOR_PURPLE,
+    COLOR_SUCCESS,
+    COLOR_WARNING,
     MODERN_DARK_QSS,
     MODERN_LIGHT_QSS,
+    THEME_PALETTES,
     build_app_icon,
     build_emoji_icon,
     build_tool_icon,
@@ -203,7 +210,14 @@ class MadGravQtMainWindow(QMainWindow):
         # other click handler in this class reads the item passed to the
         # signal directly instead of querying selection state back).
         self._tree_action_node = None
-        self._dark_theme = self.context.setting(bool, "qt_dark_theme", True)
+        # qt_theme_name is the source of truth (one of THEME_PALETTES'
+        # keys); qt_dark_theme is kept in sync as a derived bool purely
+        # for any external code/tests still reading the old setting.
+        theme_name = self.context.setting(str, "qt_theme_name", "dark")
+        if theme_name not in THEME_PALETTES:
+            theme_name = "dark"
+        self._theme_name = theme_name
+        self._dark_theme = THEME_PALETTES[self._theme_name]["is_dark"]
         # Service/device startup (e.g. activating the default device) can
         # itself fire a "refresh_scene" signal -- unrelated to any real
         # user edit -- shortly after this window's own kernel listeners
@@ -227,14 +241,20 @@ class MadGravQtMainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # Apply QSS Theme (persisted user choice, default dark)
-        self.setStyleSheet(MODERN_DARK_QSS if self._dark_theme else MODERN_LIGHT_QSS)
+        self.setStyleSheet(THEME_PALETTES[self._theme_name]["qss"])
 
         self._setup_ui()
+        # Snapshot the just-built layout (all docks/toolbars in their
+        # freshly-constructed positions) BEFORE loading any previous
+        # session's saved arrangement below -- this is what "Réinitialiser
+        # la Disposition" restores to if the user drags/resizes panels
+        # into a confusing state and wants back to a known-good layout.
+        self._default_dock_state = self.saveState()
         # The canvas paints its own bed/grid colors directly (drawBackground())
         # rather than via the QSS above, which can't reach QGraphicsView
         # content -- apply the same persisted choice there too, or a
         # light-theme session would still start with a dark canvas.
-        self.canvas.set_theme(self._dark_theme)
+        self.canvas.set_theme(THEME_PALETTES[self._theme_name])
         self._restore_window_state()
         self._update_warnings_indicator()
 
@@ -460,6 +480,22 @@ class MadGravQtMainWindow(QMainWindow):
         if state is not None:
             self.restoreState(state)
 
+    def _on_reset_panel_layout(self):
+        """Restore the just-constructed dock/toolbar arrangement (all
+        docks hidden, toolbars in their default positions) -- an escape
+        hatch for a user who dragged/resized panels into a confusing
+        state, matching every professional app's "Reset Layout" action."""
+        if self._default_dock_state is not None:
+            self.restoreState(self._default_dock_state)
+        # restoreState() reliably restores toolbar/dock POSITIONS but
+        # isn't reliable for dock VISIBILITY on every Qt build -- these
+        # three explicitly default to hidden (see _create_right_docks/
+        # _create_console_dock), so enforce that directly rather than
+        # trust restoreState() alone for it.
+        for dock in (self.dock_tools, self.dock_ops, self.dock_console):
+            dock.hide()
+        self.status_bar.showMessage("Disposition des panneaux réinitialisée.", 3000)
+
     def closeEvent(self, event):
         # Kernel-initiated closes (typed "quit", "-e quit", a remote
         # consoleserver disconnect) must exit promptly and unattended --
@@ -514,18 +550,55 @@ class MadGravQtMainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _setup_ui(self):
-        # Central Widget & Canvas
-        self.canvas = MadGravQtCanvas(self.context, self)
-        self.setCentralWidget(self.canvas)
+        # Central Widget & Multi-Document Tabs
+        self.doc_tabs = QTabWidget(self)
+        self.doc_tabs.setTabsClosable(True)
+        self.doc_tabs.setMovable(True)
+        self.doc_tabs.setDocumentMode(True)
+        self.doc_tabs.tabCloseRequested.connect(self.close_document_tab)
+        self.doc_tabs.currentChanged.connect(self._on_tab_changed)
+        self.setCentralWidget(self.doc_tabs)
+
+        # Initial Document Tab
+        initial_doc = DocumentTab(self, title="Sans Titre")
+        self.doc_tabs.addTab(initial_doc, "Sans Titre")
+        self.canvas = initial_doc.canvas
+
+    def create_new_document(self, title: str = "Sans Titre", file_path: str = None) -> DocumentTab:
+        doc = DocumentTab(self, title=title, file_path=file_path)
+        index = self.doc_tabs.addTab(doc, title)
+        self.doc_tabs.setCurrentIndex(index)
+        return doc
+
+    def current_document(self) -> DocumentTab:
+        widget = self.doc_tabs.currentWidget()
+        if isinstance(widget, DocumentTab):
+            return widget
+        return None
+
+    def close_document_tab(self, index: int):
+        if self.doc_tabs.count() <= 1:
+            doc = self.current_document()
+            if doc:
+                doc.set_file_path(None)
+                doc.set_modified(False)
+                self.doc_tabs.setTabText(0, "Sans Titre")
+            return
+        widget = self.doc_tabs.widget(index)
+        if widget:
+            self.doc_tabs.removeTab(index)
+            widget.deleteLater()
+
+    def _on_tab_changed(self, index: int):
+        doc = self.current_document()
+        if doc and doc.canvas:
+            self.canvas = doc.canvas
 
         # Menu Bar
         self._create_menubar()
 
         # Top Action Toolbar
         self._create_toolbar()
-
-        # PAO Vector Suite Toolbar
-        self._create_pao_toolbar()
 
         # Left Tool Palette
         self._create_left_tool_panel()
@@ -565,7 +638,7 @@ class MadGravQtMainWindow(QMainWindow):
         self.btn_warnings = QPushButton("", self)
         self.btn_warnings.setFlat(True)
         self.btn_warnings.setVisible(False)
-        self.btn_warnings.setStyleSheet("color: #e0a030; font-weight: bold;")
+        self.btn_warnings.setStyleSheet(f"color: {COLOR_WARNING}; font-weight: bold;")
         self.btn_warnings.setToolTip("")
         self.btn_warnings.clicked.connect(self._show_warnings_dialog)
         self.status_bar.addPermanentWidget(self.btn_warnings)
@@ -596,10 +669,20 @@ class MadGravQtMainWindow(QMainWindow):
         act_new.triggered.connect(self._on_new)
         file_menu.addAction(act_new)
 
+        act_new_tab = QAction("Nouvel Onglet Document", self)
+        act_new_tab.setShortcut(QKeySequence("Ctrl+T"))
+        act_new_tab.triggered.connect(lambda: self.create_new_document())
+        file_menu.addAction(act_new_tab)
+
         act_open = QAction("Ouvrir Fichier (SVG/DXF)...", self)
         act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.triggered.connect(self._on_open_file)
         file_menu.addAction(act_open)
+
+        act_close_tab = QAction("Fermer l'Onglet Document", self)
+        act_close_tab.setShortcut(QKeySequence("Ctrl+W"))
+        act_close_tab.triggered.connect(lambda: self.close_document_tab(self.doc_tabs.currentIndex()))
+        file_menu.addAction(act_close_tab)
 
         # Recent files -- stored as context.file0..fileN, the SAME kernel
         # settings keys the classic wx UI uses (madgrav/gui/wxmmain.py:
@@ -618,6 +701,11 @@ class MadGravQtMainWindow(QMainWindow):
         act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         act_save_as.triggered.connect(self._on_save_as)
         file_menu.addAction(act_save_as)
+
+        act_export = QAction("💾 Export Direct Multi-Formats...", self)
+        act_export.setShortcut(QKeySequence("Ctrl+E"))
+        act_export.triggered.connect(self._on_multi_format_export_dialog)
+        file_menu.addAction(act_export)
 
         file_menu.addSeparator()
         act_exit = QAction("Quitter", self)
@@ -639,44 +727,15 @@ class MadGravQtMainWindow(QMainWindow):
         self._update_undo_redo_actions()
 
         edit_menu.addSeparator()
-        act_select_all = QAction("Tout Sélectionner", self)
-        act_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)
-        act_select_all.triggered.connect(self._on_select_all)
-        edit_menu.addAction(act_select_all)
-
-        act_deselect = QAction("Tout Désélectionner", self)
-        # QKeySequence.StandardKey.Deselect has no default binding on
-        # Windows (resolves to an empty shortcut there) -- Escape is the
-        # conventional "clear selection" key in design tools generally.
-        # This is a window-level shortcut, so Qt's shortcut map claims a
-        # matching Escape press before the canvas's own keyPressEvent ever
-        # sees it -- _on_escape_pressed is the single place that decides
-        # between "cancel an in-progress draw/rubber-band/move" and
-        # "deselect everything" (see MadGravQtCanvas.cancel_in_progress_gesture).
-        act_deselect.setShortcut(QKeySequence("Escape"))
-        act_deselect.triggered.connect(self._on_escape_pressed)
-        edit_menu.addAction(act_deselect)
-
-        act_delete = QAction("Supprimer", self)
-        act_delete.setShortcut(QKeySequence.StandardKey.Delete)
-        act_delete.triggered.connect(lambda: self.canvas._delete_emphasized())
-        edit_menu.addAction(act_delete)
-
-        act_duplicate = QAction("Dupliquer", self)
-        act_duplicate.setShortcut(QKeySequence("Ctrl+D"))
-        act_duplicate.triggered.connect(self._on_duplicate)
-        edit_menu.addAction(act_duplicate)
-
-        edit_menu.addSeparator()
-        act_copy = QAction("Copier", self)
-        act_copy.setShortcut(QKeySequence.StandardKey.Copy)
-        act_copy.triggered.connect(self._on_copy)
-        edit_menu.addAction(act_copy)
-
         act_cut = QAction("Couper", self)
         act_cut.setShortcut(QKeySequence.StandardKey.Cut)
         act_cut.triggered.connect(self._on_cut)
         edit_menu.addAction(act_cut)
+
+        act_copy = QAction("Copier", self)
+        act_copy.setShortcut(QKeySequence.StandardKey.Copy)
+        act_copy.triggered.connect(self._on_copy)
+        edit_menu.addAction(act_copy)
 
         self.act_paste = QAction("Coller", self)
         self.act_paste.setShortcut(QKeySequence.StandardKey.Paste)
@@ -684,93 +743,96 @@ class MadGravQtMainWindow(QMainWindow):
         edit_menu.addAction(self.act_paste)
         self._update_paste_action()
 
+        act_duplicate = QAction("Dupliquer", self)
+        act_duplicate.setShortcut(QKeySequence("Ctrl+D"))
+        act_duplicate.triggered.connect(self._on_duplicate)
+        edit_menu.addAction(act_duplicate)
+
+        act_delete = QAction("Supprimer", self)
+        act_delete.setShortcut(QKeySequence.StandardKey.Delete)
+        act_delete.triggered.connect(lambda: self.canvas._delete_emphasized())
+        edit_menu.addAction(act_delete)
+
         edit_menu.addSeparator()
+        act_select_all = QAction("Tout Sélectionner", self)
+        act_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)
+        act_select_all.triggered.connect(self._on_select_all)
+        edit_menu.addAction(act_select_all)
+
+        act_deselect = QAction("Tout Désélectionner", self)
+        act_deselect.setShortcut(QKeySequence("Escape"))
+        act_deselect.triggered.connect(self._on_escape_pressed)
+        edit_menu.addAction(act_deselect)
+
+        edit_menu.addSeparator()
+
+        # Submenu: Transformation & Miroir
+        transform_menu = edit_menu.addMenu("🔄 Transformer & Pivoter")
         act_rotate_cw = QAction("Rotation 90° Horaire", self)
         act_rotate_cw.setShortcut(QKeySequence("Ctrl+R"))
         act_rotate_cw.triggered.connect(lambda: self._on_rotate(90))
-        edit_menu.addAction(act_rotate_cw)
+        transform_menu.addAction(act_rotate_cw)
 
         act_rotate_ccw = QAction("Rotation 90° Anti-horaire", self)
         act_rotate_ccw.setShortcut(QKeySequence("Ctrl+Shift+R"))
         act_rotate_ccw.triggered.connect(lambda: self._on_rotate(-90))
-        edit_menu.addAction(act_rotate_ccw)
+        transform_menu.addAction(act_rotate_ccw)
 
+        transform_menu.addSeparator()
         act_mirror_h = QAction("Miroir Horizontal", self)
         act_mirror_h.setShortcut(QKeySequence("Ctrl+H"))
         act_mirror_h.triggered.connect(lambda: self._on_mirror(-1, 1))
-        edit_menu.addAction(act_mirror_h)
+        transform_menu.addAction(act_mirror_h)
 
         act_mirror_v = QAction("Miroir Vertical", self)
         act_mirror_v.setShortcut(QKeySequence("Ctrl+Shift+H"))
         act_mirror_v.triggered.connect(lambda: self._on_mirror(1, -1))
-        edit_menu.addAction(act_mirror_v)
+        transform_menu.addAction(act_mirror_v)
 
-        edit_menu.addSeparator()
+        transform_menu.addSeparator()
         act_lock = QAction("Verrouiller", self)
         act_lock.triggered.connect(lambda: self._on_lock(True))
-        edit_menu.addAction(act_lock)
+        transform_menu.addAction(act_lock)
 
         act_unlock = QAction("Déverrouiller", self)
         act_unlock.triggered.connect(lambda: self._on_lock(False))
-        edit_menu.addAction(act_unlock)
+        transform_menu.addAction(act_unlock)
 
-        edit_menu.addSeparator()
-        # Z-order (paint/stacking order) -- a core PAO feature (Illustrator/
-        # Inkscape/LightBurn all have it) that was entirely missing: the
-        # document's own child order among siblings already IS the paint
-        # order (render_elements() adds items to the scene in elem_branch.
-        # flat() order, and non-emphasized items all share one Z-value, so
-        # Qt falls back to insertion order) -- this just exposes reordering
-        # that list via Node.insert_siblings(), no new rendering logic
-        # needed.
+        # Submenu: Disposition & Ordre (Z-Plan)
+        arrange_menu = edit_menu.addMenu("📚 Disposition & Ordre (Z)")
         act_bring_front = QAction("Premier Plan", self)
         act_bring_front.setShortcut(QKeySequence("Ctrl+Shift+]"))
         act_bring_front.triggered.connect(self._on_bring_to_front)
-        edit_menu.addAction(act_bring_front)
+        arrange_menu.addAction(act_bring_front)
+
+        act_raise_one = QAction("Avancer", self)
+        act_raise_one.setShortcut(QKeySequence("Ctrl+]"))
+        act_raise_one.triggered.connect(self._on_raise_one)
+        arrange_menu.addAction(act_raise_one)
+
+        act_lower_one = QAction("Reculer", self)
+        act_lower_one.setShortcut(QKeySequence("Ctrl+["))
+        act_lower_one.triggered.connect(self._on_lower_one)
+        arrange_menu.addAction(act_lower_one)
 
         act_send_back = QAction("Arrière-Plan", self)
         act_send_back.setShortcut(QKeySequence("Ctrl+Shift+["))
         act_send_back.triggered.connect(self._on_send_to_back)
-        edit_menu.addAction(act_send_back)
+        arrange_menu.addAction(act_send_back)
 
-        edit_menu.addSeparator()
+        arrange_menu.addSeparator()
         act_group = QAction("Grouper", self)
         act_group.setShortcut(QKeySequence("Ctrl+G"))
         act_group.triggered.connect(self._on_group)
-        edit_menu.addAction(act_group)
+        arrange_menu.addAction(act_group)
 
         act_ungroup = QAction("Dégrouper", self)
         act_ungroup.setShortcut(QKeySequence("Ctrl+Shift+G"))
         act_ungroup.triggered.connect(self._on_ungroup)
-        edit_menu.addAction(act_ungroup)
+        arrange_menu.addAction(act_ungroup)
 
-        # Grid (array) copy -- LightBurn's "Array Copy", one of its most
-        # heavily-used tools, was entirely unreachable from this shell
-        # despite the backend ("grid" console command, madgrav/core/
-        # elements/grid.py) already supporting it fully. Works from a
-        # single selected element (tiles copies of it), so it belongs
-        # with the single- not multi-selection actions below.
-        act_grid_copy = QAction("Copie en Grille...", self)
-        act_grid_copy.triggered.connect(self._on_grid_array_copy)
-        edit_menu.addAction(act_grid_copy)
-
-        # Radial (circular) array copy -- LightBurn's other Array Copy
-        # mode. Same "no Qt path despite an already-complete backend"
-        # situation as the grid copy above ("radial" console command,
-        # same grid.py module) -- also works from a single element.
-        act_radial_copy = QAction("Copie Radiale...", self)
-        act_radial_copy.triggered.connect(self._on_radial_array_copy)
-        edit_menu.addAction(act_radial_copy)
-
-        # Alignment -- entirely missing from Qt until now, despite being
-        # one of the most basic vector-editing operations any selection
-        # of 2+ elements needs. Same "align {mode} {direction}" console
-        # commands the classic wx UI's own align buttons run for 5 of
-        # its 6 directions (madgrav/gui/wxmmain.py -- only "Left" uses a
-        # push/pop-wrapped variant there, an inconsistency in wx itself;
-        # replicated here using the simpler, dominant form for all six).
-        edit_menu.addSeparator()
-        align_menu = edit_menu.addMenu("Aligner")
+        arrange_menu.addSeparator()
+        align_menu = arrange_menu.addMenu("Aligner")
         align_entries = [
             ("Gauche", "left"),
             ("Droite", "right"),
@@ -786,15 +848,19 @@ class MadGravQtMainWindow(QMainWindow):
             align_menu.addAction(act)
             self._align_actions.append(act)
 
-        # Boolean/CAG geometry operations -- another basic vector-editing
-        # feature entirely missing from Qt. Same "element {op}" command
-        # chain the classic wx UI's own buttons run as their always-
-        # available fallback (madgrav/extra/cag.py; wx additionally
-        # prefers a "clipper {op}" variant when the optional pyclipr
-        # package is installed, purely a performance/quality upgrade for
-        # complex shapes -- not replicated here to avoid an optional-
-        # dependency check for a non-functional difference).
-        geometry_menu = edit_menu.addMenu("Géométrie (Union, Différence...)")
+        # Submenu: Répétition & Réseaux
+        array_menu = edit_menu.addMenu("🔲 Répétition & Réseaux")
+        act_grid_copy = QAction("Copie en Grille...", self)
+        act_grid_copy.triggered.connect(self._on_grid_array_copy)
+        array_menu.addAction(act_grid_copy)
+
+        act_radial_copy = QAction("Copie Radiale...", self)
+        act_radial_copy.triggered.connect(self._on_radial_array_copy)
+        array_menu.addAction(act_radial_copy)
+
+        # Submenu: Chemins & Géométrie
+        path_geom_menu = edit_menu.addMenu("✂️ Chemins & Géométrie")
+        geometry_menu = path_geom_menu.addMenu("Géométrie (Union, Différence...)")
         geometry_entries = [
             ("Union", "union"),
             ("Différence", "difference"),
@@ -808,62 +874,35 @@ class MadGravQtMainWindow(QMainWindow):
             geometry_menu.addAction(act)
             self._geometry_actions.append(act)
 
-        # Merge/break-apart -- LightBurn's "Merge Path" (Ctrl+Alt+M) and
-        # its inverse. Distinct from the boolean CAG ops just above:
-        # merge just concatenates the selected shapes' path data into
-        # one node (stitching shared endpoints, no geometric union/
-        # subtraction), and break-apart is its exact reverse for a
-        # compound path. Both console commands declare
-        # input_type="elements" (no bare/None form) -- reached only via
-        # the "element* {cmd}" pipe, same reasoning already established
-        # for _on_device_combo_activated's index-based "device activate".
-        edit_menu.addSeparator()
+        path_geom_menu.addSeparator()
         act_merge_paths = QAction("Fusionner les Chemins", self)
         act_merge_paths.triggered.connect(self._on_merge_paths)
-        edit_menu.addAction(act_merge_paths)
+        path_geom_menu.addAction(act_merge_paths)
 
         act_break_apart = QAction("Séparer les Sous-Chemins", self)
         act_break_apart.triggered.connect(self._on_break_apart)
-        edit_menu.addAction(act_break_apart)
+        path_geom_menu.addAction(act_break_apart)
 
-        # Simplify -- LightBurn's "Simplify" (right-click menu), reduces
-        # a complex path's node count within a given tolerance. Only
-        # meaningful for "elem path" nodes (an ellipse/rect's geometry
-        # is parametric, not a literal point list -- the backend command
-        # rejects those with "Invalid node for simplify" on its own
-        # channel, which _run_console() can't surface since it's not an
-        # exception, so the type check happens here first instead).
         act_simplify = QAction("Simplifier le Chemin...", self)
         act_simplify.triggered.connect(self._on_simplify_path)
-        edit_menu.addAction(act_simplify)
+        path_geom_menu.addAction(act_simplify)
 
-        # Hatch fill -- one of LightBurn's headline features (fills a
-        # closed shape with repeating scan lines for efficient area
-        # engraving instead of a slow raster). Backend ("effect-hatch")
-        # wraps the selection in a new "effect hatch" tree node rather
-        # than mutating it in place -- same append_children()
-        # reparenting shape as "group"/"ungroup" already use elsewhere.
-        act_hatch = QAction("Remplissage Hachuré...", self)
-        act_hatch.triggered.connect(self._on_add_hatch_effect)
-        edit_menu.addAction(act_hatch)
-
-        # Offset -- LightBurn's "Offset" tool: grows/shrinks a shape's
-        # outline by a fixed distance (positive = outward, negative =
-        # inward), commonly used for kerf compensation or a cut line
-        # around an engraved area. Backend ("offset", offset_clpr.py /
-        # offset_mk.py fallback) creates NEW "elem path" node(s) rather
-        # than mutating the source in place -- same non-destructive
-        # pattern as Hatch above.
+        path_geom_menu.addSeparator()
         act_offset = QAction("Décaler (Offset)...", self)
         act_offset.triggered.connect(self._on_add_offset_path)
-        edit_menu.addAction(act_offset)
+        path_geom_menu.addAction(act_offset)
 
-        # Text tools -- "text-anchor"/"text-edit" (madgrav/core/elements/
-        # shapes.py) already no-op gracefully on a non-"elem text"
-        # selection (silently skip that node, no error), so unlike
-        # Simplify these don't need a pre-dispatch type check here.
-        edit_menu.addSeparator()
-        text_anchor_menu = edit_menu.addMenu("Alignement du Texte")
+        act_hatch = QAction("Remplissage Hachuré...", self)
+        act_hatch.triggered.connect(self._on_add_hatch_effect)
+        path_geom_menu.addAction(act_hatch)
+
+        # Submenu: Outils Texte
+        text_menu = edit_menu.addMenu("🔤 Texte")
+        act_text_edit = QAction("Modifier le Texte...", self)
+        act_text_edit.triggered.connect(self._on_edit_text_content)
+        text_menu.addAction(act_text_edit)
+
+        text_anchor_menu = text_menu.addMenu("Alignement du Texte")
         text_anchor_entries = [
             ("Gauche", "start"),
             ("Centré", "middle"),
@@ -876,10 +915,6 @@ class MadGravQtMainWindow(QMainWindow):
             text_anchor_menu.addAction(act)
             self._text_anchor_actions.append(act)
 
-        act_text_edit = QAction("Modifier le Texte...", self)
-        act_text_edit.triggered.connect(self._on_edit_text_content)
-        edit_menu.addAction(act_text_edit)
-
         # Selection-dependent actions start disabled (nothing is selected
         # at boot) and get toggled from _update_selection_dependent_actions()
         # instead of just silently no-op'ing when clicked with no selection.
@@ -889,6 +924,7 @@ class MadGravQtMainWindow(QMainWindow):
             act_unlock, act_ungroup, act_grid_copy, act_radial_copy,
             act_break_apart, act_simplify, act_hatch, act_offset,
             act_text_edit, act_bring_front, act_send_back,
+            act_raise_one, act_lower_one,
         ] + self._text_anchor_actions
         # Aligning/CAG ops need >= 2 elements too -- the backend itself
         # refuses ("No sense in aligning an element to itself" / "Not
@@ -898,23 +934,19 @@ class MadGravQtMainWindow(QMainWindow):
         )
         self._update_selection_dependent_actions()
 
+        # Submenu: Opérations Laser
         edit_menu.addSeparator()
+        ops_assign_menu = edit_menu.addMenu("🎯 Assignation Opérations")
         act_classify = QAction("Classifier Tout (Assigner aux Opérations)", self)
         act_classify.triggered.connect(self._on_classify_all)
-        edit_menu.addAction(act_classify)
+        ops_assign_menu.addAction(act_classify)
 
         # Declassify -- the reverse of Classifier Tout, but scoped to
-        # the current selection rather than the whole document (matches
-        # what the bare "declassify" console command itself defaults to
-        # with no pipe: elements.elems(emphasized=True)). Added to
-        # _single_selection_actions after the fact since that list was
-        # already finalized above -- act_classify itself isn't
-        # selection-gated (it always runs against the whole document),
-        # so it stays outside that list.
+        # the current selection rather than the whole document
         act_declassify = QAction("Retirer des Opérations", self)
         act_declassify.setEnabled(False)
         act_declassify.triggered.connect(self._on_declassify_selection)
-        edit_menu.addAction(act_declassify)
+        ops_assign_menu.addAction(act_declassify)
         self._single_selection_actions.append(act_declassify)
 
         # View
@@ -938,26 +970,75 @@ class MadGravQtMainWindow(QMainWindow):
         view_menu.addAction(act_zoom_out)
 
         view_menu.addSeparator()
-        self.act_light_theme = QAction("Thème Clair", self)
-        self.act_light_theme.setCheckable(True)
-        self.act_light_theme.setChecked(not self._dark_theme)
-        self.act_light_theme.triggered.connect(self._on_toggle_theme)
-        view_menu.addAction(self.act_light_theme)
+        self.act_camera_overlay = QAction("Superposition Caméra Lit", self)
+        self.act_camera_overlay.setShortcut(QKeySequence("F9"))
+        self.act_camera_overlay.triggered.connect(self._on_toggle_camera_overlay)
+        view_menu.addAction(self.act_camera_overlay)
+
+        act_camera_opacity = QAction("Régler l'Opacité Caméra...", self)
+        act_camera_opacity.triggered.connect(self._on_set_camera_opacity)
+        view_menu.addAction(act_camera_opacity)
+
+        self.act_opengl = QAction("⚡ Accélération Matérielle OpenGL", self)
+        self.act_opengl.setCheckable(True)
+        self.act_opengl.setChecked(False)
+        self.act_opengl.triggered.connect(self._on_toggle_opengl)
+        view_menu.addAction(self.act_opengl)
+
+        act_web_remote = QAction("📱 Télécommande Mobile Web (QR Code)...", self)
+        act_web_remote.triggered.connect(self._on_web_remote_qr_dialog)
+        view_menu.addAction(act_web_remote)
+
+        view_menu.addSeparator()
+        theme_menu = view_menu.addMenu("Thème")
+        self._theme_actions = {}
+        self._theme_action_group = QActionGroup(self)
+        self._theme_action_group.setExclusive(True)
+        for name, palette in THEME_PALETTES.items():
+            act = QAction(palette["label"], self)
+            act.setCheckable(True)
+            act.setChecked(name == self._theme_name)
+            act.triggered.connect(lambda checked=False, n=name: self._on_select_theme(n))
+            self._theme_action_group.addAction(act)
+            theme_menu.addAction(act)
+            self._theme_actions[name] = act
+        # Kept for backward compatibility -- a couple of older call sites
+        # (and this session's own tests) still refer to a single
+        # "act_light_theme" checkable toggle from before this became a
+        # 5-way picker; point it at the actual "Clair (Classique)" entry
+        # so `.isChecked()` still answers "is the classic light theme
+        # active" correctly instead of breaking outright.
+        self.act_light_theme = self._theme_actions["light"]
 
         # Window -- most of MadGrav's feature surface (device config,
         # camera, materials, rotary, etc.) lives in windows that only the
-        # classic wx UI exposes buttons for. Until each gets a native Qt
-        # rebuild, this menu is how the Qt shell reaches them, instead of
-        # requiring the exact console command to be typed by hand.
+        # classic wx UI exposes buttons for. Every entry used to just call
+        # "window open <name>" -- but that console command is only ever
+        # registered by the wx GUI plugin (madgrav/gui/plugin.py:61,
+        # `if not kernel.has_feature("wx"): return` gates its whole
+        # lifecycle), and this Qt-only build never sets that feature flag
+        # (see qt/plugin.py / has_feature("wx")==False, verified at boot),
+        # even on a machine where wxPython happens to be installed. So
+        # every single item here silently did nothing: _run_console()
+        # swallows the "Unknown command" into the console dock, which
+        # most users never have open. Confirmed via user report ("dans le
+        # menu fenetre il y a rien qui marche").
+        #
+        # Fix: route each entry to whatever real Qt-native replacement
+        # already exists elsewhere in this shell (built across earlier
+        # session cycles but never wired here); for the entries with no
+        # Qt equivalent yet, fall back to an honest "not available" dialog
+        # instead of silence -- same pattern already used by _on_about/
+        # _on_open_spooler for exactly this situation.
         window_menu = menubar.addMenu("Fe&nêtre")
         window_entries = [
-            ("Gestionnaire de Périphériques...", "DeviceManager"),
-            ("Configuration de l'Appareil...", "Configuration"),
-            ("Préférences...", "Preferences"),
+            ("Gestionnaire de Périphériques...", "DeviceManager", self._on_open_device_wizard),
+            ("Configuration de l'Appareil...", "Configuration", self._on_open_device_wizard),
+            ("Préférences...", "Preferences", None),
             None,
-            ("Propriétés de l'Élément...", "Properties"),
-            ("Informations sur l'Opération...", "OperationInfo"),
-            ("Gestionnaire de Matériaux...", "MatManager"),
+            ("Propriétés de l'Élément...", "Properties", lambda: self._show_ops_dock_tab(2)),
+            ("Informations sur l'Opération...", "OperationInfo", lambda: self._show_ops_dock_tab(0)),
+            ("Gestionnaire de Matériaux...", "MatManager", self._on_material_library_dialog),
             None,
             # Caméra intentionnellement absente ici : le service caméra lève
             # une exception non rattrapée quand aucune caméra matérielle
@@ -965,25 +1046,29 @@ class MadGravQtMainWindow(QMainWindow):
             # préexistant, indépendant de Qt, que je ne peux pas vérifier
             # sans matériel réel. Accessible en attendant via la console
             # ("window open CameraInterface").
-            ("Simulation...", "Simulation"),
-            ("Axe Rotatif...", "Rotary"),
-            ("Notes...", "Notes"),
+            ("Simulation...", "Simulation", self._on_gcode_simulation_dialog),
+            ("Axe Rotatif...", "Rotary", self._on_rotary_assistant_dialog),
+            ("Notes...", "Notes", None),
             # Not to be confused with Aide > "Raccourcis clavier..." (a
             # static read-only list of THIS Qt shell's own menu
             # shortcuts) -- wx's Keymap window is a full editor for
             # REMAPPING keys to arbitrary console commands, a different
             # and more powerful feature. Distinct labels so the two don't
             # look like the same thing in two different menus.
-            ("Personnaliser les Raccourcis (Keymap)...", "Keymap"),
-            ("Éditeur de Wordlist...", "Wordlist"),
+            ("Personnaliser les Raccourcis (Keymap)...", "Keymap", None),
+            ("Éditeur de Wordlist...", "Wordlist", None),
         ]
         for entry in window_entries:
             if entry is None:
                 window_menu.addSeparator()
                 continue
-            label, window_name = entry
+            label, window_name, qt_handler = entry
             act = QAction(label, self)
-            act.triggered.connect(lambda checked=False, n=window_name: self._open_window(n))
+            act.triggered.connect(
+                lambda checked=False, n=window_name, h=qt_handler, lbl=label: (
+                    self._open_window_or_fallback(n, h, lbl)
+                )
+            )
             window_menu.addAction(act)
 
         # Menu Outils Laser
@@ -1008,12 +1093,40 @@ class MadGravQtMainWindow(QMainWindow):
         act_qr_gen.triggered.connect(self._on_qr_code_dialog)
         gen_menu.addAction(act_qr_gen)
 
+        act_hinges = QAction("🪵 Charnières Vivantes (Flex Cut)...", self)
+        act_hinges.triggered.connect(self._on_living_hinges_dialog)
+        gen_menu.addAction(act_hinges)
+
+        act_halftone = QAction("🖼️ Studio Gravure Photo & Demi-Teintes...", self)
+        act_halftone.triggered.connect(self._on_halftone_studio_dialog)
+        gen_menu.addAction(act_halftone)
+
+        act_topo = QAction("🗺️ Générateur de Cartes Topo 3D...", self)
+        act_topo.triggered.connect(self._on_topo_map_dialog)
+        gen_menu.addAction(act_topo)
+
+        act_mandala = QAction("🌸 Générateur de Mandalas & Rosaces...", self)
+        act_mandala.triggered.connect(self._on_mandala_generator_dialog)
+        gen_menu.addAction(act_mandala)
+
+        act_inlay = QAction("🧩 Assistant Marqueterie & Incrustation (Inlay)...", self)
+        act_inlay.triggered.connect(self._on_inlay_wizard_dialog)
+        gen_menu.addAction(act_inlay)
+
+        act_tslot = QAction("🔩 Boîte à Écrous Captifs (T-Slot)...", self)
+        act_tslot.triggered.connect(self._on_tslot_box_dialog)
+        gen_menu.addAction(act_tslot)
+
         # Submenu 2: Traitements & Formes
         shape_menu = laser_tools_menu.addMenu("📐 Formes & Tracé Laser")
 
         act_mat_test = QAction("📊 Matrice de Test de Matériau...", self)
         act_mat_test.triggered.connect(self._on_material_test_dialog)
         shape_menu.addAction(act_mat_test)
+
+        act_mat_matrix = QAction("🎯 Matrice de Test Matériaux Pro (Power vs Speed)...", self)
+        act_mat_matrix.triggered.connect(self._on_material_matrix_test_dialog)
+        shape_menu.addAction(act_mat_matrix)
 
         act_grid_arr = QAction("🔲 Duplication en Réseau 2D...", self)
         act_grid_arr.triggered.connect(self._on_grid_array_dialog)
@@ -1026,6 +1139,26 @@ class MadGravQtMainWindow(QMainWindow):
         act_micro_tabs = QAction("🌉 Micro-Tabs / Ponts de Maintien...", self)
         act_micro_tabs.triggered.connect(self._on_micro_tabs_dialog)
         shape_menu.addAction(act_micro_tabs)
+
+        act_smart_vec = QAction("✏️ Vectorisation Intelligente (Trace Image)...", self)
+        act_smart_vec.triggered.connect(self._on_smart_vectorize_dialog)
+        shape_menu.addAction(act_smart_vec)
+
+        act_relief = QAction("🏔️ Aperçu Relief 3D (Niveaux de Gris)...", self)
+        act_relief.triggered.connect(self._on_relief_3d_dialog)
+        shape_menu.addAction(act_relief)
+
+        act_node_editor = QAction("🖊️ Éditeur de Nœuds Vectoriels...", self)
+        act_node_editor.triggered.connect(self._on_node_editor_dialog)
+        shape_menu.addAction(act_node_editor)
+
+        act_galvo_hatch = QAction("🏁 Hachurage Galvo & Fibre (Wobble)...", self)
+        act_galvo_hatch.triggered.connect(self._on_galvo_hatch_dialog)
+        shape_menu.addAction(act_galvo_hatch)
+
+        act_frame = QAction("▭ Cadre Autour de la Sélection...", self)
+        act_frame.triggered.connect(self._on_frame_selection)
+        shape_menu.addAction(act_frame)
 
         act_kerf_lead = QAction("✂️ Compensation Kerf & Amorces...", self)
         act_kerf_lead.triggered.connect(self._on_kerf_lead_dialog)
@@ -1054,6 +1187,27 @@ class MadGravQtMainWindow(QMainWindow):
         act_print_cut.triggered.connect(self._on_print_and_cut_dialog)
         opt_menu.addAction(act_print_cut)
 
+        act_gcode_sim = QAction("🧊 Simulation 3D & Trajectoire G-Code...", self)
+        act_gcode_sim.triggered.connect(self._on_gcode_simulation_dialog)
+        opt_menu.addAction(act_gcode_sim)
+
+        act_nesting = QAction("🧩 Imbrication Automatique (Nesting)...", self)
+        act_nesting.triggered.connect(self._on_nesting_dialog)
+        opt_menu.addAction(act_nesting)
+
+        act_trueshape = QAction("🧩 Imbrication 2D Avancée (True-Shape Nesting)...", self)
+        act_trueshape.triggered.connect(self._on_trueshape_nesting_dialog)
+        opt_menu.addAction(act_trueshape)
+
+        act_timeline = QAction("⏱️ Visualiseur Temporel & Accélération...", self)
+        act_timeline.triggered.connect(self._on_laser_timeline_dialog)
+        opt_menu.addAction(act_timeline)
+
+        act_kiosk = QAction("🖥️ Mode Atelier Tactile (Plein Écran)...", self)
+        act_kiosk.setShortcut(QKeySequence("F11"))
+        act_kiosk.triggered.connect(self._on_workshop_kiosk_dialog)
+        opt_menu.addAction(act_kiosk)
+
         # Submenu 4: Vision Caméra
         vision_menu = laser_tools_menu.addMenu("📷 Vision & Caméra")
 
@@ -1061,9 +1215,17 @@ class MadGravQtMainWindow(QMainWindow):
         act_autocal.triggered.connect(self._on_camera_autocal_dialog)
         vision_menu.addAction(act_autocal)
 
+        act_multi_head = QAction("🎯 Assistant Calibration Multi-Tête...", self)
+        act_multi_head.triggered.connect(self._on_multi_head_wizard_dialog)
+        vision_menu.addAction(act_multi_head)
+
         act_measure = QAction("📏 Détecter & Mesurer en mm...", self)
         act_measure.triggered.connect(self._on_measure_objects_dialog)
         vision_menu.addAction(act_measure)
+
+        act_scrap = QAction("🔍 Détecteur de Chutes (Scrap Finder)...", self)
+        act_scrap.triggered.connect(self._on_scrap_finder_dialog)
+        vision_menu.addAction(act_scrap)
 
         # Submenu 5: Matériaux & Gestion
         mgmt_menu = laser_tools_menu.addMenu("💶 Matériaux & Coût")
@@ -1080,6 +1242,14 @@ class MadGravQtMainWindow(QMainWindow):
         act_cost_est.triggered.connect(self._on_cost_estimator_dialog)
         mgmt_menu.addAction(act_cost_est)
 
+        act_prod_queue = QAction("🏭 File de Production Atelier & Kiosque...", self)
+        act_prod_queue.triggered.connect(self._on_production_queue_dialog)
+        mgmt_menu.addAction(act_prod_queue)
+
+        act_job_quote = QAction("🧾 Devis Client...", self)
+        act_job_quote.triggered.connect(self._on_job_quote_dialog)
+        mgmt_menu.addAction(act_job_quote)
+
         # Help
         help_menu = menubar.addMenu("&Aide")
         act_shortcuts = QAction("Raccourcis clavier...", self)
@@ -1092,6 +1262,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _create_toolbar(self):
         toolbar = QToolBar("Actions Principales", self)
+        toolbar.setObjectName("main_toolbar")
         toolbar.setIconSize(QSize(20, 20))
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
@@ -1177,106 +1348,55 @@ class MadGravQtMainWindow(QMainWindow):
         self._update_arm_button()
         self._update_coolant_button()
 
-        align_tb = QToolBar("Alignement Rapide", self)
-        align_tb.setIconSize(QSize(18, 18))
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, align_tb)
-
-        btn_al_left = QToolButton(self)
-        btn_al_left.setText("⬅ Gauche")
-        btn_al_left.setToolTip("Aligner les éléments sélectionnés à gauche")
-        btn_al_left.clicked.connect(self._on_align_left)
-        align_tb.addWidget(btn_al_left)
-
-        btn_al_ch = QToolButton(self)
-        btn_al_ch.setText("↔ Centre H")
-        btn_al_ch.setToolTip("Centrer horizontalement")
-        btn_al_ch.clicked.connect(self._on_align_center_h)
-        align_tb.addWidget(btn_al_ch)
-
-        btn_al_right = QToolButton(self)
-        btn_al_right.setText("➡️ Droite")
-        btn_al_right.setToolTip("Aligner à droite")
-        btn_al_right.clicked.connect(self._on_align_right)
-        align_tb.addWidget(btn_al_right)
-
-        align_tb.addSeparator()
-
-        btn_al_top = QToolButton(self)
-        btn_al_top.setText("⬆ Haut")
-        btn_al_top.setToolTip("Aligner en haut")
-        btn_al_top.clicked.connect(self._on_align_top)
-        align_tb.addWidget(btn_al_top)
-
-        btn_al_cv = QToolButton(self)
-        btn_al_cv.setText("↕ Centre V")
-        btn_al_cv.setToolTip("Centrer verticalement")
-        btn_al_cv.clicked.connect(self._on_align_center_v)
-        align_tb.addWidget(btn_al_cv)
-
-        btn_al_bottom = QToolButton(self)
-        btn_al_bottom.setText("⬇ Bas")
-        btn_al_bottom.setToolTip("Aligner en bas")
-        btn_al_bottom.clicked.connect(self._on_align_bottom)
-        align_tb.addWidget(btn_al_bottom)
-
-        align_tb.addSeparator()
-
-        btn_al_center_bed = QToolButton(self)
-        btn_al_center_bed.setText("🎯 Centrer Table")
-        btn_al_center_bed.setToolTip("Centrer exactement les éléments sélectionnés au milieu du lit laser")
-        btn_al_center_bed.clicked.connect(self._on_center_to_bed)
-        align_tb.addWidget(btn_al_center_bed)
-
     def _apply_toolbar_button_theme(self):
         """(Re-)applies the arm/start/pause/stop/coolant toolbar buttons'
-        inline stylesheets for the current self._dark_theme. Called once
-        at construction and again from _on_toggle_theme() -- these 5
+        inline stylesheets for the current self._theme_name. Called once
+        at construction and again from _on_select_theme() -- these 5
         buttons set their own background-color per state (a green Start,
         orange Pause, red Stop... a plain QSS class selector can't express
         that), which entirely overrides the app-wide theme stylesheet, so
-        they don't pick up the light/dark swap for free like everything
-        else does."""
-        if self._dark_theme:
-            neutral_bg, neutral_fg = "#3A3A4A", "#FFFFFF"
-            disabled_bg, disabled_fg = "#2C2C3E", "#6E6E7A"
-        else:
-            neutral_bg, neutral_fg = "#D6D6DE", "#1C1C22"
-            disabled_bg, disabled_fg = "#E4E4EA", "#9A9AA6"
+        they don't pick up a theme swap for free like everything else
+        does."""
+        palette = THEME_PALETTES[self._theme_name]
+        neutral_bg, neutral_fg = palette["neutral_bg"], palette["neutral_fg"]
+        disabled_bg, disabled_fg = palette["disabled_bg"], palette["disabled_fg"]
+        accent = palette["accent"]
 
         self.btn_arm.setStyleSheet(
             f"QToolButton {{ background-color: {neutral_bg}; color: {neutral_fg}; font-weight: bold; border-radius: 4px; padding: 3px 10px; }}"
-            "QToolButton:checked { background-color: #0A84FF; color: #FFFFFF; }"
+            f"QToolButton:checked {{ background-color: {accent}; color: #FFFFFF; }}"
         )
         self.btn_coolant.setStyleSheet(
             f"QToolButton {{ background-color: {neutral_bg}; color: {neutral_fg}; font-weight: bold; border-radius: 4px; padding: 3px 10px; }}"
-            "QToolButton:checked { background-color: #0A84FF; color: #FFFFFF; }"
+            f"QToolButton:checked {{ background-color: {accent}; color: #FFFFFF; }}"
         )
         self.btn_start.setStyleSheet(
-            "QToolButton { background-color: #248A3D; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 3px 10px; }"
+            f"QToolButton {{ background-color: {COLOR_SUCCESS}; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 3px 10px; }}"
             f"QToolButton:disabled {{ background-color: {disabled_bg}; color: {disabled_fg}; }}"
         )
         self.btn_pause.setStyleSheet(
-            "QToolButton { background-color: #B25D00; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 3px 10px; }"
+            f"QToolButton {{ background-color: {COLOR_WARNING}; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 3px 10px; }}"
             f"QToolButton:disabled {{ background-color: {disabled_bg}; color: {disabled_fg}; }}"
         )
         self.btn_stop.setStyleSheet(
-            "QToolButton { background-color: #C02B2B; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 3px 10px; }"
+            f"QToolButton {{ background-color: {COLOR_DANGER}; color: #FFFFFF; font-weight: bold; border-radius: 4px; padding: 3px 10px; }}"
             f"QToolButton:disabled {{ background-color: {disabled_bg}; color: {disabled_fg}; }}"
         )
 
     def _apply_tool_icon_theme(self):
         """(Re-)draws the left draw-tool panel's icons for the current
-        self._dark_theme -- build_tool_icon() bakes a fixed foreground
+        self._theme_name -- build_tool_icon() bakes a fixed foreground
         color into the pixmap at draw time (unlike a QSS color, which a
         raster icon can't pick up automatically), so this must be
-        called again on every theme toggle, same reasoning as
+        called again on every theme change, same reasoning as
         _apply_toolbar_button_theme() above."""
-        color = "#E2E2E9" if self._dark_theme else "#1C1C22"
+        color = THEME_PALETTES[self._theme_name]["tool_icon_color"]
         for icon_name, btn in getattr(self, "_tool_buttons", {}).items():
             btn.setIcon(build_tool_icon(icon_name, size=22, color=color))
 
     def _create_left_tool_panel(self):
         self.dock_tools = dock_tools = QDockWidget("Outils Laser & Dessin", self)
+        dock_tools.setObjectName("dock_tools")
         dock_tools.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
@@ -1292,7 +1412,7 @@ class MadGravQtMainWindow(QMainWindow):
 
         # Category 1: Dessin & Sélection
         lbl_draw = QLabel("🎨 Dessin & Sélection")
-        lbl_draw.setStyleSheet("font-weight: bold; color: #0A84FF; margin-top: 2px;")
+        lbl_draw.setStyleSheet(f"font-weight: bold; color: {COLOR_ACCENT}; margin-top: 2px;")
         layout.addWidget(lbl_draw)
 
         self.tool_group = QButtonGroup(self)
@@ -1349,7 +1469,7 @@ class MadGravQtMainWindow(QMainWindow):
 
         # Category 2: Générateurs 3D & Vectoriels
         lbl_gen = QLabel("📦 Générateurs 3D & CAD")
-        lbl_gen.setStyleSheet("font-weight: bold; color: #30D158; margin-top: 6px;")
+        lbl_gen.setStyleSheet(f"font-weight: bold; color: {COLOR_SUCCESS}; margin-top: 6px;")
         layout.addWidget(lbl_gen)
 
         gen_grid = QGridLayout()
@@ -1360,6 +1480,7 @@ class MadGravQtMainWindow(QMainWindow):
             ("⚙️", "Engren.", "Engrenage -- Générer un engrenage droit à évolvente personnalisable", self._on_gear_generator_dialog),
             ("🧩", "Puzzle", "Puzzle -- Générer un puzzle vectoriel emboîtable", self._on_jigsaw_generator_dialog),
             ("🔲", "QR Code", "QR Code -- Générer un QR Code ou code-barres vectoriel", self._on_qr_code_dialog),
+            ("🪵", "Charn.", "Charnières Vivantes -- Motif de flex cut pour plier bois/acrylique", self._on_living_hinges_dialog),
         ]
         for i, (emoji, label, tip, handler) in enumerate(laser_gens):
             btn = QToolButton(self)
@@ -1377,7 +1498,7 @@ class MadGravQtMainWindow(QMainWindow):
 
         # Category 3: Formes & Traitements Laser
         lbl_proc = QLabel("📐 Traitements Laser")
-        lbl_proc.setStyleSheet("font-weight: bold; color: #FF9F0A; margin-top: 6px;")
+        lbl_proc.setStyleSheet(f"font-weight: bold; color: {COLOR_WARNING}; margin-top: 6px;")
         layout.addWidget(lbl_proc)
 
         laser_grid = QGridLayout()
@@ -1398,6 +1519,11 @@ class MadGravQtMainWindow(QMainWindow):
             # "🔢" (not "🔄", already used by Axe Rotatif below) -- same
             # duplicate-glyph issue as Grille 2D above.
             ("🔢", "Ordre", "Ordre Découpe -- Optimiser l'ordre découpe (trous intérieurs en premier)", self._on_optimize_cut_order),
+            ("✏️", "Vector.", "Vectorisation -- Tracer une image bitmap sélectionnée en contours vectoriels", self._on_smart_vectorize_dialog),
+            ("🏔️", "Relief 3D", "Relief 3D -- Aperçu de la carte de puissance variable pour gravure en relief", self._on_relief_3d_dialog),
+            ("🖊️", "Nœuds", "Éditeur de Nœuds -- Déplacer, insérer ou supprimer les points d'ancrage d'un tracé", self._on_node_editor_dialog),
+            ("🏁", "Galvo", "Hachurage Galvo & Fibre -- Motif dense avec mode Wobble pour nettoyage/décapage", self._on_galvo_hatch_dialog),
+            ("▭", "Cadre", "Cadre -- Dessiner un rectangle autour de la sélection (positionnement matière)", self._on_frame_selection),
         ]
         for i, (emoji, label, tip, handler) in enumerate(laser_tools):
             btn = QToolButton(self)
@@ -1415,7 +1541,7 @@ class MadGravQtMainWindow(QMainWindow):
 
         # Category 4: Vision, Matériaux & Coût
         lbl_vis = QLabel("📷 Vision & Production")
-        lbl_vis.setStyleSheet("font-weight: bold; color: #BF5AF2; margin-top: 6px;")
+        lbl_vis.setStyleSheet(f"font-weight: bold; color: {COLOR_PURPLE}; margin-top: 6px;")
         layout.addWidget(lbl_vis)
 
         prod_grid = QGridLayout()
@@ -1429,6 +1555,11 @@ class MadGravQtMainWindow(QMainWindow):
             ("📚", "Matér.", "Matériaux -- Bibliothèque de préréglages laser (Bois, Acrylique, etc.)", self._on_material_library_dialog),
             ("🔄", "Rotatif", "Axe Rotatif -- Assistant de calcul pas/mm pour objets cylindriques", self._on_rotary_assistant_dialog),
             ("💶", "Coût", "Estimateur Coût -- Calculateur de temps et coût de production", self._on_cost_estimator_dialog),
+            ("🧮", "Imbric.", "Imbrication (Nesting) -- Réarranger les pièces sélectionnées sur une plaque", self._on_nesting_dialog),
+            ("🧾", "Devis", "Devis Client -- Calculer un devis détaillé matière/machine/marge", self._on_job_quote_dialog),
+            ("🏭", "Prod.", "File de Production -- Gestionnaire de file et mode kiosque atelier", self._on_production_queue_dialog),
+            ("🎯", "M-Tête", "Calibration Multi-Tête -- Assistant d'alignement laser double-tête", self._on_multi_head_wizard_dialog),
+            ("🧊", "Sim G-Code", "Simulation G-Code -- Trajectoire 3D et estimation de durée", self._on_gcode_simulation_dialog),
         ]
         for i, (emoji, label, tip, handler) in enumerate(prod_tools):
             btn = QToolButton(self)
@@ -1444,6 +1575,71 @@ class MadGravQtMainWindow(QMainWindow):
         layout.addLayout(prod_grid)
         layout.setAlignment(prod_grid, Qt.AlignmentFlag.AlignLeft)
 
+        # Category 5: Aligner, Booléens & Modifier -- used to be its own
+        # QToolBar (_create_pao_toolbar, removed). A native QToolBar with
+        # 20 text-heavy buttons doesn't have anywhere good to live: docked
+        # horizontally (top/bottom) it always overflows into Qt's "..."
+        # extension popup (which can't even render entries that were
+        # QToolButtons added via addWidget() -- see the "..." fix
+        # earlier), and docked vertically (left/right) it still has to
+        # fit its own column of 20 stacked buttons squeezed against
+        # dock_tools fighting for the same edge, which visually broke
+        # the whole left side instead of fixing anything (user report,
+        # both times: "les 3 points ... rien a faire", then "je veux pas
+        # la barre ... en haut" persisted even after moving it to Left).
+        # Every OTHER "many small actions" group in this app already
+        # lives as a wrapping grid inside this one scrollable dock
+        # instead of a toolbar -- same fix here, consistent with
+        # Générateurs/Traitements/Vision above, and it can never overflow
+        # since QGridLayout just wraps to another row.
+        lbl_align = QLabel("📐 Aligner, Booléens & Modifier")
+        lbl_align.setStyleSheet(f"font-weight: bold; color: {COLOR_ACCENT}; margin-top: 6px;")
+        layout.addWidget(lbl_align)
+
+        align_grid = QGridLayout()
+        align_grid.setHorizontalSpacing(1)
+        align_grid.setVerticalSpacing(2)
+        align_tools = [
+            ("⬅", "Gauche", "Aligner les éléments sélectionnés à gauche", self._on_align_left),
+            ("↔", "Centre H", "Centrer horizontalement", self._on_align_center_h),
+            ("➡️", "Droite", "Aligner à droite", self._on_align_right),
+            ("⬆", "Haut", "Aligner en haut", self._on_align_top),
+            ("↕", "Centre V", "Centrer verticalement", self._on_align_center_v),
+            ("⬇", "Bas", "Aligner en bas", self._on_align_bottom),
+            ("🛏️", "Centrer Table", "Centrer exactement les éléments sélectionnés au milieu du lit laser", self._on_center_to_bed),
+            ("➕", "Unir", "Unir / Fusionner les formes sélectionnées (Union)", lambda: self._execute_cag("union")),
+            ("➖", "Soustraire", "Soustraire la forme supérieure de la forme inférieure (Différence)", lambda: self._execute_cag("difference")),
+            ("✖️", "Intersecter", "Conserver uniquement l'intersection des formes (Intersection)", lambda: self._execute_cag("intersection")),
+            # "🔳" (not "🔲", already used by QR Code above) -- same
+            # duplicate-glyph issue avoided elsewhere in this dock.
+            ("🔳", "Exclure", "Exclure le chevauchement (XOR)", lambda: self._execute_cag("xor")),
+            ("⇔", "Miroir H", "Inverser horizontalement la sélection", self._on_mirror_h),
+            ("⇕", "Miroir V", "Inverser verticalement la sélection", self._on_mirror_v),
+            # "↻" (not "🔄", already used by Axe Rotatif above).
+            ("↻", "Pivot 90°", "Pivoter la sélection de 90°", self._on_rotate_90_cw),
+            ("⫴", "Répartir H", "Répartir uniformément l'espacement horizontal", self._on_distribute_h),
+            ("⫵", "Répartir V", "Répartir uniformément l'espacement vertical", self._on_distribute_v),
+            ("📐", "Égaliser L", "Uniformiser la largeur de la sélection sur le premier élément", self._on_match_width),
+            ("📐", "Égaliser H", "Uniformiser la hauteur de la sélection sur le premier élément", self._on_match_height),
+            # "◎" (not "⭕", already used by Circul. above).
+            ("◎", "Contour", "Créer un contour vectoriel intérieur/extérieur", self._on_open_offset_dialog),
+            # "▤" (not "🏁", already used by Galvo above).
+            ("▤", "Hachurage", "Créer un remplissage hachuré vectoriel pour la gravure", self._on_add_hatch_effect),
+        ]
+        for i, (emoji, label, tip, handler) in enumerate(align_tools):
+            btn = QToolButton(self)
+            btn.setIcon(build_emoji_icon(emoji, size=24))
+            btn.setIconSize(QSize(24, 24))
+            btn.setText(label)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setFixedSize(50, 44)
+            btn.setStyleSheet("font-size: 9px;")
+            btn.setToolTip(tip)
+            btn.clicked.connect(handler)
+            align_grid.addWidget(btn, i // 4, i % 4)
+        layout.addLayout(align_grid)
+        layout.setAlignment(align_grid, Qt.AlignmentFlag.AlignLeft)
+
         layout.addStretch()
         scroll.setWidget(w)
         dock_tools.setWidget(scroll)
@@ -1452,6 +1648,7 @@ class MadGravQtMainWindow(QMainWindow):
     def _create_right_docks(self):
         # Inspector Dock with 3 Tabs: Operations, Position/Transform, Materials
         self.dock_ops = dock_ops = QDockWidget("Inspecteur & Contrôle", self)
+        dock_ops.setObjectName("dock_ops")
         
         tab_widget = QTabWidget(self)
 
@@ -1519,7 +1716,7 @@ class MadGravQtMainWindow(QMainWindow):
         laser_btn_grid.addWidget(btn_lb_stop, 0, 1)
 
         btn_lb_start = QPushButton("▶ Démarrer", self)
-        btn_lb_start.setStyleSheet("background-color: #248A3D; color: white; font-weight: bold;")
+        btn_lb_start.setStyleSheet(f"background-color: {COLOR_SUCCESS}; color: white; font-weight: bold;")
         btn_lb_start.clicked.connect(self._on_start)
         laser_btn_grid.addWidget(btn_lb_start, 0, 2)
 
@@ -1633,6 +1830,11 @@ class MadGravQtMainWindow(QMainWindow):
 
         tab_widget.addTab(w_mat, "Bibliothèque de matériaux")
 
+        # Kept for Fenêtre > Propriétés/Informations sur l'Opération, which
+        # jump straight to the relevant tab here instead of opening a
+        # separate (nonexistent, wx-only) window -- see _show_ops_dock_tab.
+        self.ops_tab_widget = tab_widget
+
         dock_ops.setWidget(tab_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock_ops)
         self._refresh_operations_tree()
@@ -1667,6 +1869,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _create_console_dock(self):
         self.dock_console = dock_console = QDockWidget("Console de Commandes Kernel", self)
+        dock_console.setObjectName("dock_console")
         w_con = QWidget()
         l_con = QVBoxLayout(w_con)
         l_con.setContentsMargins(6, 6, 6, 6)
@@ -1708,8 +1911,14 @@ class MadGravQtMainWindow(QMainWindow):
         action.setText("Console de Commandes")
         self._panels_menu.addAction(action)
 
+        self._panels_menu.addSeparator()
+        act_reset_layout = QAction("🔄 Réinitialiser la Disposition des Panneaux", self)
+        act_reset_layout.triggered.connect(self._on_reset_panel_layout)
+        self._panels_menu.addAction(act_reset_layout)
+
     def _create_layer_palette_bar(self):
         palette_tb = QToolBar("Palette des Calques", self)
+        palette_tb.setObjectName("layer_palette_toolbar")
         palette_tb.setIconSize(QSize(16, 16))
         self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, palette_tb)
 
@@ -1894,7 +2103,7 @@ class MadGravQtMainWindow(QMainWindow):
         """kind is "fill" or "stroke" -- both existing console commands,
         parsed the same way as _on_position_field_edited's console pipe."""
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         from PyQt6.QtWidgets import QColorDialog
 
@@ -1908,7 +2117,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_stroke_width_edited(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         width_mm = self.stroke_width_spin.value()
         if self._run_console(f"stroke-width {width_mm}mm"):
@@ -1917,7 +2126,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_position_field_edited(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         x = self.pos_x_spin.value()
         y = self.pos_y_spin.value()
@@ -1931,7 +2140,7 @@ class MadGravQtMainWindow(QMainWindow):
         # the top-left corner fixed, so this behaves as a pure resize
         # rather than an implicit move to the origin.
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         x = self.pos_x_spin.value()
         y = self.pos_y_spin.value()
@@ -1951,16 +2160,21 @@ class MadGravQtMainWindow(QMainWindow):
         selected = list(elements.elems(emphasized=True)) if elements is not None else []
         self._update_selection_dependent_actions(selected)
         self._update_position_panel(selected)
-        if node is None:
+        # Check the real emphasized count FIRST, not the node= signal
+        # payload alone -- a rubber-band/programmatic multi-select with no
+        # prior single selection passes node=None (elements.py collapses
+        # first_emphasized to None whenever several are emphasized with
+        # no earlier anchor), which used to show "Aucune sélection" here
+        # even though _update_selection_dependent_actions above correctly
+        # left the Edit menu's multi-selection actions enabled -- a
+        # visibly contradictory, confusing status label.
+        if not selected:
             self.selection_label.setText("Aucune sélection")
             return
-        # The canvas' rubber-band/Shift-click multi-selection only passes
-        # its first node through this signal -- check the real emphasized
-        # count so a multi-selection doesn't silently look like a
-        # single-element one in the status bar.
         if len(selected) > 1:
             self.selection_label.setText(f"Sélection: {len(selected)} éléments")
             return
+        node = selected[0]
         label = None
         if hasattr(node, "display_label"):
             label = node.display_label()
@@ -2656,6 +2870,49 @@ class MadGravQtMainWindow(QMainWindow):
         self.status_bar.showMessage(f"Enregistré: {path}", 3000)
         self.console_output.appendPlainText(f"Projet enregistré: {path}")
 
+    def _on_toggle_camera_overlay(self):
+        if hasattr(self, "canvas") and self.canvas:
+            state = self.canvas.toggle_camera_overlay()
+            msg = "Caméra lit activée" if state else "Caméra lit désactivée"
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(msg, 2000)
+
+    def _on_set_camera_opacity(self):
+        if not hasattr(self, "canvas") or not self.canvas:
+            return
+        val, ok = QInputDialog.getInt(
+            self, "Opacité Caméra", "Opacité de la caméra lit (%):",
+            int(self.canvas.camera_overlay_opacity * 100), 0, 100, 5
+        )
+        if ok:
+            self.canvas.set_camera_opacity(val / 100.0)
+
+    def _on_toggle_opengl(self, checked: bool):
+        if hasattr(self, "canvas") and self.canvas:
+            self.canvas.enable_opengl(checked)
+            msg = "Accélération matérielle OpenGL activée" if checked else "Rendu logiciel standard actif"
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(msg, 3000)
+
+    def _on_multi_format_export_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import MultiFormatExportDialog
+        from madgrav.tools.multi_export import export_job_to_file
+        dialog = MultiFormatExportDialog(default_path=self.current_file_path or "export_job.gcode", parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            params = dialog.get_parameters()
+            ok = export_job_to_file(
+                self.context.elements,
+                filepath=params["filepath"],
+                format_type=params["format_type"],
+                laser_power=params["laser_power"],
+                speed_mm_s=params["speed_mm_s"],
+            )
+            if ok:
+                self.status_bar.showMessage(f"Fichier exporté avec succès : {params['filepath']}", 4000)
+                self.console_output.appendPlainText(f"Export réussi : {params['filepath']} (Format: {params['format_type']})")
+            else:
+                QMessageBox.warning(self, "Export", "Échec lors de l'export du fichier.")
+
     def _on_new(self):
         elements = getattr(self.context, "elements", None)
         has_content = bool(elements is not None and list(elements.elem_branch.flat())[1:])
@@ -2732,26 +2989,50 @@ class MadGravQtMainWindow(QMainWindow):
             return []
         return [node for node in elements.elems() if getattr(node, "emphasized", False)]
 
+    def _get_selected_image_node(self):
+        """Return the first selected 'elem image' node with real PIL image
+        data, or None -- shared by the image-driven tools (Smart Vectorize,
+        3D Relief Preview) so "select a bitmap first" only lives here once."""
+        for node in self._get_selected_nodes():
+            if getattr(node, "type", None) == "elem image" and getattr(node, "image", None) is not None:
+                return node
+        return None
+
+    def _get_selected_path_node(self):
+        """Return the first selected 'elem path' node with real Path
+        geometry, or None -- used by the Node Editor dialog."""
+        for node in self._get_selected_nodes():
+            if getattr(node, "type", None) == "elem path" and getattr(node, "path", None) is not None:
+                return node
+        return None
+
     def _on_align_left(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments à aligner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
             return
         min_x = min(b[0] for b in bounds_list)
-        for node in nodes:
-            if hasattr(node, "bounds") and node.bounds:
-                dx = min_x - node.bounds[0]
-                if abs(dx) > 1e-4:
-                    node.matrix.post_translate(dx, 0)
-                    node.modified()
+        # Direct node.matrix mutation has no undoscope of its own here --
+        # same confirmed-empirically gap as frame/box-generator, now in
+        # the alignment toolkit (a Ctrl+Z after Align used to leave
+        # elements at their aligned position).
+        with self.context.elements.undoscope("Aligner à Gauche"):
+            for node in nodes:
+                if hasattr(node, "bounds") and node.bounds:
+                    dx = min_x - node.bounds[0]
+                    if abs(dx) > 1e-4:
+                        node.matrix.post_translate(dx, 0)
+                        node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Aligné à gauche.", 2000)
 
     def _on_align_center_h(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments à aligner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
@@ -2759,53 +3040,59 @@ class MadGravQtMainWindow(QMainWindow):
         min_x = min(b[0] for b in bounds_list)
         max_x = max(b[2] for b in bounds_list)
         mid_x = (min_x + max_x) / 2.0
-        for node in nodes:
-            if hasattr(node, "bounds") and node.bounds:
-                node_mid = (node.bounds[0] + node.bounds[2]) / 2.0
-                dx = mid_x - node_mid
-                if abs(dx) > 1e-4:
-                    node.matrix.post_translate(dx, 0)
-                    node.modified()
+        with self.context.elements.undoscope("Centrer Horizontalement"):
+            for node in nodes:
+                if hasattr(node, "bounds") and node.bounds:
+                    node_mid = (node.bounds[0] + node.bounds[2]) / 2.0
+                    dx = mid_x - node_mid
+                    if abs(dx) > 1e-4:
+                        node.matrix.post_translate(dx, 0)
+                        node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Centré horizontalement.", 2000)
 
     def _on_align_right(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments à aligner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
             return
         max_x = max(b[2] for b in bounds_list)
-        for node in nodes:
-            if hasattr(node, "bounds") and node.bounds:
-                dx = max_x - node.bounds[2]
-                if abs(dx) > 1e-4:
-                    node.matrix.post_translate(dx, 0)
-                    node.modified()
+        with self.context.elements.undoscope("Aligner à Droite"):
+            for node in nodes:
+                if hasattr(node, "bounds") and node.bounds:
+                    dx = max_x - node.bounds[2]
+                    if abs(dx) > 1e-4:
+                        node.matrix.post_translate(dx, 0)
+                        node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Aligné à droite.", 2000)
 
     def _on_align_top(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments à aligner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
             return
         min_y = min(b[1] for b in bounds_list)
-        for node in nodes:
-            if hasattr(node, "bounds") and node.bounds:
-                dy = min_y - node.bounds[1]
-                if abs(dy) > 1e-4:
-                    node.matrix.post_translate(0, dy)
-                    node.modified()
+        with self.context.elements.undoscope("Aligner en Haut"):
+            for node in nodes:
+                if hasattr(node, "bounds") and node.bounds:
+                    dy = min_y - node.bounds[1]
+                    if abs(dy) > 1e-4:
+                        node.matrix.post_translate(0, dy)
+                        node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Aligné en haut.", 2000)
 
     def _on_align_center_v(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments à aligner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
@@ -2813,36 +3100,40 @@ class MadGravQtMainWindow(QMainWindow):
         min_y = min(b[1] for b in bounds_list)
         max_y = max(b[3] for b in bounds_list)
         mid_y = (min_y + max_y) / 2.0
-        for node in nodes:
-            if hasattr(node, "bounds") and node.bounds:
-                node_mid = (node.bounds[1] + node.bounds[3]) / 2.0
-                dy = mid_y - node_mid
-                if abs(dy) > 1e-4:
-                    node.matrix.post_translate(0, dy)
-                    node.modified()
+        with self.context.elements.undoscope("Centrer Verticalement"):
+            for node in nodes:
+                if hasattr(node, "bounds") and node.bounds:
+                    node_mid = (node.bounds[1] + node.bounds[3]) / 2.0
+                    dy = mid_y - node_mid
+                    if abs(dy) > 1e-4:
+                        node.matrix.post_translate(0, dy)
+                        node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Centré verticalement.", 2000)
 
     def _on_align_bottom(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments à aligner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
             return
         max_y = max(b[3] for b in bounds_list)
-        for node in nodes:
-            if hasattr(node, "bounds") and node.bounds:
-                dy = max_y - node.bounds[3]
-                if abs(dy) > 1e-4:
-                    node.matrix.post_translate(0, dy)
-                    node.modified()
+        with self.context.elements.undoscope("Aligner en Bas"):
+            for node in nodes:
+                if hasattr(node, "bounds") and node.bounds:
+                    dy = max_y - node.bounds[3]
+                    if abs(dy) > 1e-4:
+                        node.matrix.post_translate(0, dy)
+                        node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Aligné en bas.", 2000)
 
     def _on_center_to_bed(self):
         nodes = self._get_selected_nodes()
         if not nodes:
+            self.status_bar.showMessage("Sélectionnez au moins un élément à centrer.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
@@ -2863,147 +3154,14 @@ class MadGravQtMainWindow(QMainWindow):
         dx = target_cx - curr_cx
         dy = target_cy - curr_cy
 
-        for node in nodes:
-            if hasattr(node, "bounds") and node.bounds:
-                node.matrix.post_translate(dx, dy)
-                node.modified()
+        with self.context.elements.undoscope("Centrer sur la Table"):
+            for node in nodes:
+                if hasattr(node, "bounds") and node.bounds:
+                    node.matrix.post_translate(dx, dy)
+                    node.modified()
 
         self._on_document_changed()
         self.status_bar.showMessage(f"Éléments centrés sur la table ({bed_w:.0f}x{bed_h:.0f} mm).", 2000)
-
-    def _create_pao_toolbar(self):
-        pao_tb = QToolBar("Outillage PAO Vectoriel", self)
-        pao_tb.setIconSize(QSize(18, 18))
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, pao_tb)
-
-        # CAG Booleans
-        btn_union = QToolButton(self)
-        btn_union.setText("➕ Unir")
-        btn_union.setToolTip("Unir / Fusionner les formes sélectionnées (Union)")
-        btn_union.clicked.connect(lambda: self._execute_cag("union"))
-        pao_tb.addWidget(btn_union)
-
-        btn_diff = QToolButton(self)
-        btn_diff.setText("➖ Soustraire")
-        btn_diff.setToolTip("Soustraire la forme supérieure de la forme inférieure (Différence)")
-        btn_diff.clicked.connect(lambda: self._execute_cag("difference"))
-        pao_tb.addWidget(btn_diff)
-
-        btn_inter = QToolButton(self)
-        btn_inter.setText("✖️ Intersecter")
-        btn_inter.setToolTip("Conserver uniquement l'intersection des formes (Intersection)")
-        btn_inter.clicked.connect(lambda: self._execute_cag("intersection"))
-        pao_tb.addWidget(btn_inter)
-
-        btn_xor = QToolButton(self)
-        btn_xor.setText("🔲 Exclure")
-        btn_xor.setToolTip("Exclure le chevauchement (XOR)")
-        btn_xor.clicked.connect(lambda: self._execute_cag("xor"))
-        pao_tb.addWidget(btn_xor)
-
-        pao_tb.addSeparator()
-
-        # Mirrors & Rotate
-        btn_mh = QToolButton(self)
-        btn_mh.setText("↔️ Miroir H")
-        btn_mh.setToolTip("Inverser horizontalement la sélection")
-        btn_mh.clicked.connect(self._on_mirror_h)
-        pao_tb.addWidget(btn_mh)
-
-        btn_mv = QToolButton(self)
-        btn_mv.setText("↕️ Miroir V")
-        btn_mv.setToolTip("Inverser verticalement la sélection")
-        btn_mv.clicked.connect(self._on_mirror_v)
-        pao_tb.addWidget(btn_mv)
-
-        btn_r90 = QToolButton(self)
-        btn_r90.setText("🔄 Pivot 90°")
-        btn_r90.setToolTip("Pivoter la sélection de 90°")
-        btn_r90.clicked.connect(self._on_rotate_90_cw)
-        pao_tb.addWidget(btn_r90)
-
-        pao_tb.addSeparator()
-
-        # Distribution & Uniform Size
-        btn_dist_h = QToolButton(self)
-        btn_dist_h.setText("⫴ Répartir H")
-        btn_dist_h.setToolTip("Répartir uniformément l'espacement horizontal")
-        btn_dist_h.clicked.connect(self._on_distribute_h)
-        pao_tb.addWidget(btn_dist_h)
-
-        btn_dist_v = QToolButton(self)
-        btn_dist_v.setText("⫵ Répartir V")
-        btn_dist_v.setToolTip("Répartir uniformément l'espacement vertical")
-        btn_dist_v.clicked.connect(self._on_distribute_v)
-        pao_tb.addWidget(btn_dist_v)
-
-        btn_match_w = QToolButton(self)
-        btn_match_w.setText("📐 Égaliser L")
-        btn_match_w.setToolTip("Uniformiser la largeur de la sélection sur le premier élément")
-        btn_match_w.clicked.connect(self._on_match_width)
-        pao_tb.addWidget(btn_match_w)
-
-        btn_match_h = QToolButton(self)
-        btn_match_h.setText("📐 Égaliser H")
-        btn_match_h.setToolTip("Uniformiser la hauteur de la sélection sur le premier élément")
-        btn_match_h.clicked.connect(self._on_match_height)
-        pao_tb.addWidget(btn_match_h)
-
-        pao_tb.addSeparator()
-
-        # Modifiers & Generators
-        btn_offset = QToolButton(self)
-        btn_offset.setText("⭕ Contour (Offset)")
-        btn_offset.setToolTip("Créer un contour vectoriel intérieur/extérieur")
-        btn_offset.clicked.connect(self._on_open_offset_dialog)
-        pao_tb.addWidget(btn_offset)
-
-        btn_box = QToolButton(self)
-        btn_box.setText("📦 Boîtes à encoches")
-        btn_box.setToolTip("Générateur de boîtes en bois/acrylique à assemblage par encoches")
-        btn_box.clicked.connect(self._on_open_box_generator)
-        pao_tb.addWidget(btn_box)
-
-        btn_gear = QToolButton(self)
-        btn_gear.setText("⚙️ Engrenages CAO")
-        btn_gear.setToolTip("Générateur d'engrenages et pignons paramétriques")
-        btn_gear.clicked.connect(self._on_open_gear_generator)
-        pao_tb.addWidget(btn_gear)
-
-        btn_hatch = QToolButton(self)
-        btn_hatch.setText("🏁 Hachurage")
-        btn_hatch.setToolTip("Créer un remplissage hachuré vectoriel pour la gravure")
-        btn_hatch.clicked.connect(self._on_add_hatch_effect)
-        pao_tb.addWidget(btn_hatch)
-
-        btn_qr = QToolButton(self)
-        btn_qr.setText("📱 QR Code")
-        btn_qr.setToolTip("Générer un QR Code ou Code-barres vectoriel")
-        btn_qr.clicked.connect(self._on_open_barcode_generator)
-        pao_tb.addWidget(btn_qr)
-
-        btn_hinges = QToolButton(self)
-        btn_hinges.setText("🪵 Charnières")
-        btn_hinges.setToolTip("Générer des charnières vivantes pour le pliage du matériau")
-        btn_hinges.clicked.connect(self._on_open_living_hinges)
-        pao_tb.addWidget(btn_hinges)
-
-    def _on_open_barcode_generator(self):
-        text, ok = QInputDialog.getText(self, "Générateur QR Code & Code-barres", "Texte / URL à encoder :", text="https://github.com/obra/superpowers")
-        if ok and text:
-            try:
-                self.context(f"qrcode {text}\n")
-                self._on_document_changed()
-                self.status_bar.showMessage("QR Code généré avec succès.", 3000)
-            except Exception as e:
-                self.status_bar.showMessage(f"Erreur QR code : {e}", 3000)
-
-    def _on_open_living_hinges(self):
-        try:
-            self.context("hinges\n")
-            self.status_bar.showMessage("Charnières vivantes générées.", 3000)
-        except Exception:
-            self.status_bar.showMessage("Assistant charnières exécuté dans la console.", 3000)
 
     def _execute_cag(self, op_name: str):
         nodes = self._get_selected_nodes()
@@ -3020,6 +3178,7 @@ class MadGravQtMainWindow(QMainWindow):
     def _on_mirror_h(self):
         nodes = self._get_selected_nodes()
         if not nodes:
+            self.status_bar.showMessage("Sélectionnez au moins un élément à retourner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
@@ -3027,16 +3186,18 @@ class MadGravQtMainWindow(QMainWindow):
         min_x = min(b[0] for b in bounds_list)
         max_x = max(b[2] for b in bounds_list)
         center_x = (min_x + max_x) / 2.0
-        for node in nodes:
-            if hasattr(node, "matrix"):
-                node.matrix.post_scale(-1, 1, center_x, 0)
-                node.modified()
+        with self.context.elements.undoscope("Miroir Horizontal"):
+            for node in nodes:
+                if hasattr(node, "matrix"):
+                    node.matrix.post_scale(-1, 1, center_x, 0)
+                    node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Miroir horizontal appliqué.", 2000)
 
     def _on_mirror_v(self):
         nodes = self._get_selected_nodes()
         if not nodes:
+            self.status_bar.showMessage("Sélectionnez au moins un élément à retourner.", 3000)
             return
         bounds_list = [node.bounds for node in nodes if hasattr(node, "bounds") and node.bounds]
         if not bounds_list:
@@ -3044,10 +3205,11 @@ class MadGravQtMainWindow(QMainWindow):
         min_y = min(b[1] for b in bounds_list)
         max_y = max(b[3] for b in bounds_list)
         center_y = (min_y + max_y) / 2.0
-        for node in nodes:
-            if hasattr(node, "matrix"):
-                node.matrix.post_scale(1, -1, 0, center_y)
-                node.modified()
+        with self.context.elements.undoscope("Miroir Vertical"):
+            for node in nodes:
+                if hasattr(node, "matrix"):
+                    node.matrix.post_scale(1, -1, 0, center_y)
+                    node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Miroir vertical appliqué.", 2000)
 
@@ -3064,16 +3226,18 @@ class MadGravQtMainWindow(QMainWindow):
         max_y = max(b[3] for b in bounds_list)
         cx = (min_x + max_x) / 2.0
         cy = (min_y + max_y) / 2.0
-        for node in nodes:
-            if hasattr(node, "matrix"):
-                node.matrix.post_rotate(90, cx, cy)
-                node.modified()
+        with self.context.elements.undoscope("Rotation 90°"):
+            for node in nodes:
+                if hasattr(node, "matrix"):
+                    node.matrix.post_rotate(90, cx, cy)
+                    node.modified()
         self._on_document_changed()
         self.status_bar.showMessage("Rotation 90° effectuée.", 2000)
 
     def _on_distribute_h(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 3:
+            self.status_bar.showMessage("Sélectionnez au moins 3 éléments à répartir.", 3000)
             return
         nodes_with_bounds = [(node, node.bounds) for node in nodes if hasattr(node, "bounds") and node.bounds]
         if len(nodes_with_bounds) < 3:
@@ -3085,19 +3249,21 @@ class MadGravQtMainWindow(QMainWindow):
         sum_widths = sum(b[2] - b[0] for _, b in nodes_with_bounds)
         gap = (total_span - sum_widths) / (len(nodes_with_bounds) - 1)
         curr_x = min_x
-        for node, b in nodes_with_bounds:
-            w = b[2] - b[0]
-            dx = curr_x - b[0]
-            if abs(dx) > 1e-4:
-                node.matrix.post_translate(dx, 0)
-                node.modified()
-            curr_x += w + gap
+        with self.context.elements.undoscope("Distribution Horizontale"):
+            for node, b in nodes_with_bounds:
+                w = b[2] - b[0]
+                dx = curr_x - b[0]
+                if abs(dx) > 1e-4:
+                    node.matrix.post_translate(dx, 0)
+                    node.modified()
+                curr_x += w + gap
         self._on_document_changed()
         self.status_bar.showMessage("Distribution horizontale effectuée.", 2000)
 
     def _on_distribute_v(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 3:
+            self.status_bar.showMessage("Sélectionnez au moins 3 éléments à répartir.", 3000)
             return
         nodes_with_bounds = [(node, node.bounds) for node in nodes if hasattr(node, "bounds") and node.bounds]
         if len(nodes_with_bounds) < 3:
@@ -3109,19 +3275,21 @@ class MadGravQtMainWindow(QMainWindow):
         sum_heights = sum(b[3] - b[1] for _, b in nodes_with_bounds)
         gap = (total_span - sum_heights) / (len(nodes_with_bounds) - 1)
         curr_y = min_y
-        for node, b in nodes_with_bounds:
-            h = b[3] - b[1]
-            dy = curr_y - b[1]
-            if abs(dy) > 1e-4:
-                node.matrix.post_translate(0, dy)
-                node.modified()
-            curr_y += h + gap
+        with self.context.elements.undoscope("Distribution Verticale"):
+            for node, b in nodes_with_bounds:
+                h = b[3] - b[1]
+                dy = curr_y - b[1]
+                if abs(dy) > 1e-4:
+                    node.matrix.post_translate(0, dy)
+                    node.modified()
+                curr_y += h + gap
         self._on_document_changed()
         self.status_bar.showMessage("Distribution verticale effectuée.", 2000)
 
     def _on_match_width(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments (référence + cibles).", 3000)
             return
         ref_b = getattr(nodes[0], "bounds", None)
         if not ref_b:
@@ -3129,20 +3297,22 @@ class MadGravQtMainWindow(QMainWindow):
         target_w = ref_b[2] - ref_b[0]
         if target_w <= 0:
             return
-        for node in nodes[1:]:
-            b = getattr(node, "bounds", None)
-            if b and (b[2] - b[0]) > 0:
-                curr_w = b[2] - b[0]
-                sx = target_w / curr_w
-                cx = (b[0] + b[2]) / 2.0
-                node.matrix.post_scale(sx, 1, cx, 0)
-                node.modified()
+        with self.context.elements.undoscope("Égaliser Largeur"):
+            for node in nodes[1:]:
+                b = getattr(node, "bounds", None)
+                if b and (b[2] - b[0]) > 0:
+                    curr_w = b[2] - b[0]
+                    sx = target_w / curr_w
+                    cx = (b[0] + b[2]) / 2.0
+                    node.matrix.post_scale(sx, 1, cx, 0)
+                    node.modified()
         self._on_document_changed()
         self.status_bar.showMessage(f"Largeurs égalisées ({target_w:.2f} mm).", 2000)
 
     def _on_match_height(self):
         nodes = self._get_selected_nodes()
         if len(nodes) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments (référence + cibles).", 3000)
             return
         ref_b = getattr(nodes[0], "bounds", None)
         if not ref_b:
@@ -3150,14 +3320,15 @@ class MadGravQtMainWindow(QMainWindow):
         target_h = ref_b[3] - ref_b[1]
         if target_h <= 0:
             return
-        for node in nodes[1:]:
-            b = getattr(node, "bounds", None)
-            if b and (b[3] - b[1]) > 0:
-                curr_h = b[3] - b[1]
-                sy = target_h / curr_h
-                cy = (b[1] + b[3]) / 2.0
-                node.matrix.post_scale(1, sy, 0, cy)
-                node.modified()
+        with self.context.elements.undoscope("Égaliser Hauteur"):
+            for node in nodes[1:]:
+                b = getattr(node, "bounds", None)
+                if b and (b[3] - b[1]) > 0:
+                    curr_h = b[3] - b[1]
+                    sy = target_h / curr_h
+                    cy = (b[1] + b[3]) / 2.0
+                    node.matrix.post_scale(1, sy, 0, cy)
+                    node.modified()
         self._on_document_changed()
         self.status_bar.showMessage(f"Hauteurs égalisées ({target_h:.2f} mm).", 2000)
 
@@ -3170,18 +3341,6 @@ class MadGravQtMainWindow(QMainWindow):
                 self.status_bar.showMessage(f"Contour vectoriel créé (Offset {dist} mm).", 3000)
             except Exception as e:
                 self.status_bar.showMessage(f"Erreur offset : {e}", 3000)
-
-    def _on_open_box_generator(self):
-        try:
-            self.context("box_generator\n")
-        except Exception:
-            self.status_bar.showMessage("Générateur de boîtes lancé dans la console.", 3000)
-
-    def _on_open_gear_generator(self):
-        try:
-            self.context("gear_generator\n")
-        except Exception:
-            self.status_bar.showMessage("Générateur d'engrenages lancé dans la console.", 3000)
 
     def _on_apply_material_preset(self):
         preset_idx = self.mat_combo.currentIndex()
@@ -3214,7 +3373,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_duplicate(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console("element copy"):
             self._refresh_operations_tree()
@@ -3228,14 +3387,14 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_copy(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console("clipboard copy"):
             self.status_bar.showMessage("Copié dans le presse-papiers.", 2000)
 
     def _on_cut(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console("clipboard cut"):
             self._refresh_operations_tree()
@@ -3263,7 +3422,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_rotate(self, degrees: int):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console(f"rotate {degrees}deg"):
             self.canvas.render_elements()
@@ -3275,7 +3434,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_mirror(self, scale_x: int, scale_y: int):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         # Mirroring is a negative scale about the selection's own center
         # (the "scale" command's default pivot) -- not the wx UI's
@@ -3289,7 +3448,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_lock(self, locked: bool):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         # Same direct assignment as the "lock"/"unlock" console commands'
         # own bodies (madgrav/core/elements/branches.py) -- done here
@@ -3297,8 +3456,9 @@ class MadGravQtMainWindow(QMainWindow):
         # commands declare input_type="elements" (no bare/None form) and
         # are only meant to be reached by piping, e.g. "element* lock".
         nodes = list(elements.elems(emphasized=True))
-        for node in nodes:
-            node.lock = locked
+        with elements.undoscope("Verrouiller" if locked else "Déverrouiller"):
+            for node in nodes:
+                node.lock = locked
         elements.signal("element_property_update", nodes)
         # No canvas refresh needed: lock has no visual representation on the
         # canvas today (no geometry/color change) -- confirmed items and
@@ -3311,6 +3471,50 @@ class MadGravQtMainWindow(QMainWindow):
         verb = "verrouillé" if locked else "déverrouillé"
         self.status_bar.showMessage(f"{len(nodes)} élément(s) {verb}.", 2000)
 
+    def _on_raise_one(self):
+        # One-step version of _on_bring_to_front below: swaps the node
+        # with its immediate NEXT sibling (the one painted just after
+        # it) via Node.insert_siblings() -- inserting the node after
+        # that sibling removes it from its old slot and re-places it one
+        # position later, same as Illustrator/Inkscape's "Bring
+        # Forward" vs. "Bring to Front".
+        elements = getattr(self.context, "elements", None)
+        if elements is None or not any(elements.elems(emphasized=True)):
+            return
+        nodes = list(elements.elems(emphasized=True))
+        with elements.undoscope("Avancer"):
+            for node in nodes:
+                parent = node.parent
+                if parent is None or node not in parent.children:
+                    continue
+                siblings = parent.children
+                idx = siblings.index(node)
+                if idx >= len(siblings) - 1:
+                    continue  # already frontmost
+                siblings[idx + 1].insert_siblings([node], below=True)
+        elements.signal("refresh_scene", "Scene")
+        self.canvas.render_elements()
+        self.status_bar.showMessage(f"{len(nodes)} élément(s) avancé(s).", 2000)
+
+    def _on_lower_one(self):
+        elements = getattr(self.context, "elements", None)
+        if elements is None or not any(elements.elems(emphasized=True)):
+            return
+        nodes = list(elements.elems(emphasized=True))
+        with elements.undoscope("Reculer"):
+            for node in nodes:
+                parent = node.parent
+                if parent is None or node not in parent.children:
+                    continue
+                siblings = parent.children
+                idx = siblings.index(node)
+                if idx <= 0:
+                    continue  # already backmost
+                siblings[idx - 1].insert_siblings([node], below=False)
+        elements.signal("refresh_scene", "Scene")
+        self.canvas.render_elements()
+        self.status_bar.showMessage(f"{len(nodes)} élément(s) reculé(s).", 2000)
+
     def _on_bring_to_front(self):
         # The document's own child order among siblings already IS the
         # paint order (render_elements() adds items to the scene in
@@ -3320,7 +3524,7 @@ class MadGravQtMainWindow(QMainWindow):
         # front" means here, via the same Node.insert_siblings() bulk-
         # move primitive groups.py already uses internally.
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         nodes = list(elements.elems(emphasized=True))
         with elements.undoscope("Premier Plan"):
@@ -3338,7 +3542,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_send_to_back(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         nodes = list(elements.elems(emphasized=True))
         with elements.undoscope("Arrière-Plan"):
@@ -3374,7 +3578,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_ungroup(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console("ungroup"):
             self._refresh_operations_tree()
@@ -3400,7 +3604,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_break_apart(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console("element* subpath"):
             self._refresh_operations_tree()
@@ -3411,7 +3615,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_simplify_path(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         selected = list(elements.elems(emphasized=True))
         if not any(getattr(n, "type", None) == "elem path" for n in selected):
@@ -3453,7 +3657,8 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_add_hatch_effect(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
+            self.status_bar.showMessage("Veuillez sélectionner au moins une forme sur le plan de travail.", 3000)
             return
         from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 
@@ -3499,7 +3704,8 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_add_offset_path(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
+            self.status_bar.showMessage("Veuillez sélectionner au moins une forme sur le plan de travail.", 3000)
             return
         from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 
@@ -3538,7 +3744,7 @@ class MadGravQtMainWindow(QMainWindow):
         # erroring -- safe to dispatch without a pre-check the way
         # Simplify needs one (that backend hard-rejects instead).
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console(f"text-anchor {anchor}"):
             self.canvas.render_elements()
@@ -3549,7 +3755,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_edit_text_content(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         selected = list(elements.elems(emphasized=True))
         text_nodes = [n for n in selected if getattr(n, "type", None) == "elem text"]
@@ -3584,7 +3790,7 @@ class MadGravQtMainWindow(QMainWindow):
         # dialog works the same way) more directly than the console
         # command's own "100%"-of-size default would.
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QSpinBox
 
@@ -3640,7 +3846,7 @@ class MadGravQtMainWindow(QMainWindow):
         # the spinbox range already enforces, avoiding the console
         # command's own CommandSyntaxError path entirely.
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         from PyQt6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QSpinBox
 
@@ -3700,6 +3906,7 @@ class MadGravQtMainWindow(QMainWindow):
     def _on_align(self, direction: str):
         elements = getattr(self.context, "elements", None)
         if elements is None or len(list(elements.elems(emphasized=True))) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments à aligner.", 3000)
             return
         align_mode = "first" if self.context.setting(bool, "align_first", True) else "last"
         if self._run_console(f"align {align_mode} {direction}"):
@@ -3710,6 +3917,7 @@ class MadGravQtMainWindow(QMainWindow):
     def _on_geometry_op(self, op: str):
         elements = getattr(self.context, "elements", None)
         if elements is None or len(list(elements.elems(emphasized=True))) < 2:
+            self.status_bar.showMessage("Sélectionnez au moins 2 éléments pour cette opération.", 3000)
             return
         if self._run_console(f"element {op}"):
             self._refresh_operations_tree()
@@ -3738,7 +3946,7 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _on_declassify_selection(self):
         elements = getattr(self.context, "elements", None)
-        if elements is None or elements.first_emphasized is None:
+        if elements is None or not any(elements.elems(emphasized=True)):
             return
         if self._run_console("declassify"):
             self._refresh_operations_tree()
@@ -3750,17 +3958,41 @@ class MadGravQtMainWindow(QMainWindow):
         self._on_zoom_changed(self.canvas.transform().m11())
         self.status_bar.showMessage("Vue ajustée.", 2000)
 
-    def _on_toggle_theme(self):
-        self._dark_theme = not self.act_light_theme.isChecked()
+    def _on_select_theme(self, theme_name):
+        """Switches the active theme (one of THEME_PALETTES' 5 keys) and
+        re-applies every piece that can't pick it up automatically from
+        the QSS stylesheet alone: the canvas (paints its own bed/grid/
+        rulers, see qt_canvas.py's set_theme) and the arm/start/pause/
+        stop/coolant toolbar buttons + tool icons (each sets its own
+        inline stylesheet/pixmap that overrides the app-wide QSS)."""
+        if theme_name not in THEME_PALETTES:
+            return
+        palette = THEME_PALETTES[theme_name]
+        self._theme_name = theme_name
+        self._dark_theme = palette["is_dark"]
+
+        self.context.setting(str, "qt_theme_name", "dark")
+        self.context.qt_theme_name = theme_name
+        # Kept in sync purely for external/legacy code still reading the
+        # old boolean setting (see _theme_actions/act_light_theme above).
         self.context.setting(bool, "qt_dark_theme", True)
         self.context.qt_dark_theme = self._dark_theme
-        self.setStyleSheet(MODERN_DARK_QSS if self._dark_theme else MODERN_LIGHT_QSS)
-        self.canvas.set_theme(self._dark_theme)
+
+        self.setStyleSheet(palette["qss"])
+        self.canvas.set_theme(palette)
         self._apply_toolbar_button_theme()
         self._apply_tool_icon_theme()
-        self.status_bar.showMessage(
-            "Thème sombre activé." if self._dark_theme else "Thème clair activé.", 2000
-        )
+
+        for name, act in getattr(self, "_theme_actions", {}).items():
+            act.setChecked(name == theme_name)
+
+        self.status_bar.showMessage(f"Thème « {palette['label']} » activé.", 2000)
+
+    def _on_toggle_theme(self):
+        # Pre-existing name kept as a thin wrapper -- some older call
+        # sites/tests still invoke this directly as a dark<->light
+        # toggle rather than the full theme-name picker above.
+        self._on_select_theme("light" if self._dark_theme else "dark")
 
     def _on_show_shortcuts(self):
         # Built from the QActions actually bound at menu-construction time
@@ -3840,6 +4072,37 @@ class MadGravQtMainWindow(QMainWindow):
 
     def _open_window(self, window_name: str):
         self._run_console(f"window open {window_name}")
+
+    def _show_ops_dock_tab(self, index):
+        # "Jump to" for Fenêtre > Propriétés / Informations sur l'Opération
+        # -- both already live as tabs in the right-side inspector dock
+        # rather than as separate windows, so this just surfaces the dock
+        # and switches to the relevant tab instead of pretending a
+        # standalone window exists.
+        self.dock_ops.setVisible(True)
+        self.dock_ops.raise_()
+        self.ops_tab_widget.setCurrentIndex(index)
+
+    def _open_window_or_fallback(self, window_name, qt_handler, label):
+        # See the Fenêtre menu comment in _setup_menus (or wherever this
+        # was called from) for why "window open X" alone can't be trusted:
+        # the wx-only "window" console command is never registered in this
+        # Qt-only build, so this checks the registry directly first --
+        # same pattern as _on_about/_on_open_spooler -- before falling
+        # back to whatever real Qt-native handler covers this feature, or
+        # to an honest "not available" message if none does yet.
+        if list(self.context.match(f"window/{window_name}")):
+            self._run_console(f"window open {window_name}")
+            return
+        if qt_handler is not None:
+            qt_handler()
+            return
+        QMessageBox.information(
+            self,
+            label.rstrip("."),
+            f"« {label} » n'est pas encore disponible dans cette version Qt de MadGrav "
+            "(fonctionnalité historique de l'ancienne interface wx, pas encore reconstruite ici).",
+        )
 
     def _on_tool_select(self):
         self.canvas.set_draw_mode(None)
@@ -4115,7 +4378,7 @@ class MadGravQtMainWindow(QMainWindow):
             device = self.context.device
             label = getattr(device, "label", None) or str(device)
             status_text = f"Connecté: {label}"
-            status_color = "#30D158"
+            status_color = COLOR_SUCCESS
             # Same state checks the classic wx canvas uses to tint its
             # background while a job runs (madgrav/gui/wxmscene.py:
             # on_driver_mode) -- here reflected in the existing status
@@ -4123,10 +4386,10 @@ class MadGravQtMainWindow(QMainWindow):
             try:
                 if device.driver.paused:
                     status_text = f"En pause : {label}"
-                    status_color = "#FF9F0A"
+                    status_color = COLOR_WARNING
                 elif device.laser_status == "active":
                     status_text = f"En cours : {label}"
-                    status_color = "#FF3B30"
+                    status_color = COLOR_DANGER
             except AttributeError:
                 pass
             self.device_status_lbl.setText(status_text)
@@ -4134,7 +4397,10 @@ class MadGravQtMainWindow(QMainWindow):
         else:
             device = None
             self.device_status_lbl.setText("Aucun appareil actif")
-            self.device_status_lbl.setStyleSheet("color: #C02B2B; font-weight: bold;")
+            # Was a separate, slightly different red (#C02B2B) from the
+            # "En cours" state above -- unified to the same COLOR_DANGER
+            # so every red status in this label means the same shade.
+            self.device_status_lbl.setStyleSheet(f"color: {COLOR_DANGER}; font-weight: bold;")
 
         kernel = getattr(self.context, "kernel", None)
         devices = list(kernel.services("device")) if kernel is not None else []
@@ -4225,15 +4491,20 @@ class MadGravQtMainWindow(QMainWindow):
         from madgrav.tools.material_test import generate_material_test
         dialog = MaterialTestDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            nodes = generate_material_test(
-                self.context.elements,
-                rows=dialog.spin_rows.value(),
-                cols=dialog.spin_cols.value(),
-                min_speed_mm_s=dialog.spin_min_speed.value(),
-                max_speed_mm_s=dialog.spin_max_speed.value(),
-                min_power_ratio=dialog.spin_min_power.value() * 10.0,
-                max_power_ratio=dialog.spin_max_power.value() * 10.0,
-            )
+            # None of the madgrav/tools/*.py generators call
+            # elements.undoscope() themselves (confirmed empirically for
+            # "frame" earlier this session) -- wrap each call site here so
+            # Ctrl+Z actually reverts what it just created.
+            with self.context.elements.undoscope("Test Matériau"):
+                nodes = generate_material_test(
+                    self.context.elements,
+                    rows=dialog.spin_rows.value(),
+                    cols=dialog.spin_cols.value(),
+                    min_speed_mm_s=dialog.spin_min_speed.value(),
+                    max_speed_mm_s=dialog.spin_max_speed.value(),
+                    min_power_ratio=dialog.spin_min_power.value() * 10.0,
+                    max_power_ratio=dialog.spin_max_power.value() * 10.0,
+                )
             self._on_zoom_fit()
             QMessageBox.information(self, "Test Matériau", f"Matrice de test de matériau générée ({len(nodes)} éléments).")
 
@@ -4242,16 +4513,17 @@ class MadGravQtMainWindow(QMainWindow):
         from madgrav.tools.box_generator import generate_finger_box
         dialog = BoxGeneratorDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            nodes = generate_finger_box(
-                self.context.elements,
-                width_mm=dialog.spin_width.value(),
-                height_mm=dialog.spin_height.value(),
-                depth_mm=dialog.spin_depth.value(),
-                thickness_mm=dialog.spin_thickness.value(),
-                tab_width_mm=dialog.spin_tab_width.value(),
-                kerf_mm=dialog.spin_kerf.value(),
-                open_top=dialog.chk_open_top.isChecked(),
-            )
+            with self.context.elements.undoscope("Boîte 3D"):
+                nodes = generate_finger_box(
+                    self.context.elements,
+                    width_mm=dialog.spin_width.value(),
+                    height_mm=dialog.spin_height.value(),
+                    depth_mm=dialog.spin_depth.value(),
+                    thickness_mm=dialog.spin_thickness.value(),
+                    tab_width_mm=dialog.spin_tab_width.value(),
+                    kerf_mm=dialog.spin_kerf.value(),
+                    open_top=dialog.chk_open_top.isChecked(),
+                )
             self._on_zoom_fit()
             QMessageBox.information(self, "Boîte 3D", f"Patron 2D de boîte 3D généré ({len(nodes)} panneaux).")
 
@@ -4260,12 +4532,13 @@ class MadGravQtMainWindow(QMainWindow):
         from madgrav.tools.gear_generator import generate_involute_gear
         dialog = GearGeneratorDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            generate_involute_gear(
-                self.context.elements,
-                num_teeth=dialog.spin_teeth.value(),
-                module=dialog.spin_module.value(),
-                bore_diameter_mm=dialog.spin_bore.value(),
-            )
+            with self.context.elements.undoscope("Engrenage"):
+                generate_involute_gear(
+                    self.context.elements,
+                    num_teeth=dialog.spin_teeth.value(),
+                    module=dialog.spin_module.value(),
+                    bore_diameter_mm=dialog.spin_bore.value(),
+                )
             self._on_zoom_fit()
             QMessageBox.information(self, "Engrenage", "Engrenage droit à évolvente généré avec succès.")
 
@@ -4274,13 +4547,14 @@ class MadGravQtMainWindow(QMainWindow):
         from madgrav.tools.jigsaw_generator import generate_jigsaw_puzzle
         dialog = JigsawGeneratorDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            generate_jigsaw_puzzle(
-                self.context.elements,
-                width_mm=dialog.spin_width.value(),
-                height_mm=dialog.spin_height.value(),
-                rows=dialog.spin_rows.value(),
-                cols=dialog.spin_cols.value(),
-            )
+            with self.context.elements.undoscope("Puzzle"):
+                generate_jigsaw_puzzle(
+                    self.context.elements,
+                    width_mm=dialog.spin_width.value(),
+                    height_mm=dialog.spin_height.value(),
+                    rows=dialog.spin_rows.value(),
+                    cols=dialog.spin_cols.value(),
+                )
             self._on_zoom_fit()
             QMessageBox.information(self, "Puzzle", "Grille de puzzle vectoriel générée.")
 
@@ -4288,7 +4562,8 @@ class MadGravQtMainWindow(QMainWindow):
         from madgrav.tools.barcode_generator import generate_qr_code_vector
         text, ok = QInputDialog.getText(self, "QR Code / Code-Barres", "Entrez le texte, l'URL ou la donnée à encoder :", text="https://madgrav.io")
         if ok and text:
-            generate_qr_code_vector(self.context.elements, data_str=text)
+            with self.context.elements.undoscope("QR Code"):
+                generate_qr_code_vector(self.context.elements, data_str=text)
             self._on_zoom_fit()
 
     def _on_grid_array_dialog(self):
@@ -4296,13 +4571,14 @@ class MadGravQtMainWindow(QMainWindow):
         from madgrav.tools.array_generator import generate_grid_array
         dialog = GridArrayDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            created = generate_grid_array(
-                self.context.elements,
-                rows=dialog.spin_rows.value(),
-                cols=dialog.spin_cols.value(),
-                distance_x_mm=dialog.spin_dist_x.value(),
-                distance_y_mm=dialog.spin_dist_y.value(),
-            )
+            with self.context.elements.undoscope("Réseau 2D"):
+                created = generate_grid_array(
+                    self.context.elements,
+                    rows=dialog.spin_rows.value(),
+                    cols=dialog.spin_cols.value(),
+                    distance_x_mm=dialog.spin_dist_x.value(),
+                    distance_y_mm=dialog.spin_dist_y.value(),
+                )
             self._on_zoom_fit()
             QMessageBox.information(self, "Réseau 2D", f"{len(created)} éléments créés en grille.")
 
@@ -4311,53 +4587,77 @@ class MadGravQtMainWindow(QMainWindow):
         from madgrav.tools.array_generator import generate_circular_array
         dialog = CircularArrayDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            created = generate_circular_array(self.context.elements, count=dialog.spin_count.value())
+            with self.context.elements.undoscope("Réseau Circulaire"):
+                created = generate_circular_array(self.context.elements, count=dialog.spin_count.value())
             self._on_zoom_fit()
             QMessageBox.information(self, "Réseau Circulaire", f"{len(created)} éléments créés en réseau circulaire.")
 
     def _on_micro_tabs_dialog(self):
         from madgrav.tools.micro_tabs import apply_tabs_to_selected_nodes
-        count = apply_tabs_to_selected_nodes(self.context.elements, tab_width_mm=0.5, tab_count=4)
+        with self.context.elements.undoscope("Micro-Tabs"):
+            count = apply_tabs_to_selected_nodes(self.context.elements, tab_width_mm=0.5, tab_count=4)
         self.canvas.update()
         QMessageBox.information(self, "Micro-Tabs", f"Micro-tabs ajoutés à {count} éléments.")
 
     def _on_kerf_lead_dialog(self):
         from madgrav.tools.kerf_lead import apply_kerf_and_lead_to_selection
-        count = apply_kerf_and_lead_to_selection(self.context.elements, kerf_mm=0.1, mode="outer", lead_in_mm=2.0)
+        with self.context.elements.undoscope("Kerf & Amorces"):
+            count = apply_kerf_and_lead_to_selection(self.context.elements, kerf_mm=0.1, mode="outer", lead_in_mm=2.0)
         self.canvas.update()
         QMessageBox.information(self, "Kerf & Amorces", f"Kerf et amorces appliqués à {count} éléments.")
 
     def _on_stamp_mode_dialog(self):
         from madgrav.tools.stamp_mode import apply_stamp_mode
-        created = apply_stamp_mode(self.context.elements, shoulder_width_mm=0.5, invert=True)
+        with self.context.elements.undoscope("Mode Tampon"):
+            created = apply_stamp_mode(self.context.elements, shoulder_width_mm=0.5, invert=True)
         self.canvas.update()
         QMessageBox.information(self, "Mode Tampon", f"Épaulements de tampon créés ({len(created)} nœuds).")
 
     def _on_optimize_cut_order(self):
         from madgrav.tools.cut_optimizer import optimize_cut_order
-        reordered = optimize_cut_order(self.context.elements, inner_first=True, minimize_travel=True)
+        with self.context.elements.undoscope("Ordre de Découpe"):
+            reordered = optimize_cut_order(self.context.elements, inner_first=True, minimize_travel=True)
         self.canvas.update()
         QMessageBox.information(self, "Optimisation Découpe", f"Ordre de découpe optimisé pour {len(reordered)} éléments (trous intérieurs en premier).")
 
     def _on_variable_text_dialog(self):
-        from madgrav.tools.variable_text import apply_variable_text_serialization
-        created = apply_variable_text_serialization(self.context.elements, count=5)
-        self.canvas.update()
-        QMessageBox.information(self, "Texte Variable", f"{len(created)} éléments sérialisés générés.")
+        from madgrav.qt.qt_laser_dialogs import VariableTextMergeDialog
+        from madgrav.tools.variable_text import generate_merged_variable_layout, apply_variable_text_serialization
+        dialog = VariableTextMergeDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            params = dialog.get_parameters()
+            with self.context.elements.undoscope("Fusion Texte Variable"):
+                if params["records"]:
+                    created = generate_merged_variable_layout(
+                        self.context.elements,
+                        records=params["records"],
+                        template_pattern=params["template_pattern"],
+                        columns=params["columns"],
+                        spacing_x_mm=params["spacing_x_mm"],
+                        spacing_y_mm=params["spacing_y_mm"],
+                    )
+                else:
+                    created = apply_variable_text_serialization(self.context.elements, count=5)
+            self.canvas.update()
+            self.status_bar.showMessage(f"{len(created)} étiquettes générées", 3000)
+            self.console_output.appendPlainText(f"Fusion texte variable terminée : {len(created)} éléments créés.")
 
     def _on_print_and_cut_dialog(self):
-        QMessageBox.information(self, "Print & Cut", "Alignement 2-Points Print & Cut configuré.")
+        from madgrav.qt.qt_laser_dialogs import PrintAndCutDialog
+        dialog = PrintAndCutDialog(self)
+        dialog.exec()
 
     def _on_slot_fitter_dialog(self):
         from madgrav.qt.qt_laser_dialogs import SlotFitterDialog
         from madgrav.tools.slot_fitter import apply_slot_fitter_to_nodes
         dialog = SlotFitterDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            count = apply_slot_fitter_to_nodes(
-                self.context.elements,
-                old_thickness_mm=dialog.spin_old_thickness.value(),
-                new_thickness_mm=dialog.spin_new_thickness.value(),
-            )
+            with self.context.elements.undoscope("Ajusteur Encoches"):
+                count = apply_slot_fitter_to_nodes(
+                    self.context.elements,
+                    old_thickness_mm=dialog.spin_old_thickness.value(),
+                    new_thickness_mm=dialog.spin_new_thickness.value(),
+                )
             self.canvas.update()
             QMessageBox.information(self, "Ajusteur Encoches", f"Encoches ajustées sur {count} éléments.")
 
@@ -4381,7 +4681,8 @@ class MadGravQtMainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             mat = dialog.combo_material.currentText()
             mode = dialog.combo_mode.currentText()
-            applied = apply_material_preset(self.context.elements, mat, 3.0, mode)
+            with self.context.elements.undoscope("Préréglage Matériau"):
+                applied = apply_material_preset(self.context.elements, mat, 3.0, mode)
             self.canvas.update()
             if applied:
                 QMessageBox.information(self, "Matériaux", f"Préréglage '{mat}' appliqué aux opérations.")
@@ -4389,9 +4690,12 @@ class MadGravQtMainWindow(QMainWindow):
                 QMessageBox.warning(self, "Matériaux", "Aucune opération de découpe compatible trouvée.")
 
     def _on_rotary_assistant_dialog(self):
-        from madgrav.tools.rotary_assistant import calculate_rotary_parameters
-        res = calculate_rotary_parameters(object_diameter_mm=80.0, is_chuck=True)
-        QMessageBox.information(self, "Axe Rotatif", f"Diamètre : 80mm\nPérimètre : {res['circumference_mm']:.2f}mm\nRésolution : {res['pulses_per_mm']:.2f} pas/mm.")
+        from madgrav.qt.qt_laser_dialogs import RotaryAssistantDialog
+        dialog = RotaryAssistantDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            params = dialog.get_parameters()
+            self.status_bar.showMessage(f"Axe Rotatif configuré : {params['pulses_per_mm']:.2f} pas/mm", 4000)
+            self.console_output.appendPlainText(f"Configuration Axe Rotatif : {params['pulses_per_mm']:.3f} pas/mm (Périmètre: {params['circumference_mm']:.2f} mm)")
 
     def _on_cost_estimator_dialog(self):
         from madgrav.tools.cost_estimator import estimate_job_cost
@@ -4405,4 +4709,360 @@ class MadGravQtMainWindow(QMainWindow):
             f"COÛT TOTAL ESTIMÉ : {est['total_cost_eur']:.2f} €"
         )
         QMessageBox.information(self, "Estimation de Coût Laser", msg)
+
+    def _on_living_hinges_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import LivingHingesDialog
+        from madgrav.tools.flex_hinge import generate_living_hinge
+        dialog = LivingHingesDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            hinge_path = generate_living_hinge(
+                width_mm=dialog.spin_width.value(),
+                height_mm=dialog.spin_height.value(),
+                pattern=dialog.combo_pattern.currentText(),
+                cut_length_mm=dialog.spin_cut_length.value(),
+                gap_length_mm=dialog.spin_gap_length.value(),
+                line_spacing_mm=dialog.spin_spacing.value(),
+            )
+            elements = getattr(self.context, "elements", None)
+            if elements is not None:
+                # flex_hinge.py never calls elements.undoscope() itself
+                # (confirmed empirically for "frame" -- no madgrav/tools/*.py
+                # generator does) -- wrap here so Ctrl+Z reverts it.
+                with elements.undoscope("Charnière Vivante"):
+                    elem_node = elements.elem_branch.add(
+                        type="elem path",
+                        path=hinge_path,
+                        stroke=elements.default_stroke,
+                        label="Charnière Vivante (Flex Cut)",
+                    )
+                    elem_node.altered()
+                elements.signal("refresh_scene", "Scene")
+                self._on_zoom_fit()
+                self.canvas.render_elements()
+                QMessageBox.information(self, "Charnières Vivantes", "Motif de charnière vivante généré avec succès.")
+
+    def _on_multi_head_wizard_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import MultiHeadWizardDialog
+        from madgrav.tools.multi_head_wizard import calculate_dual_head_offset
+        dialog = MultiHeadWizardDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            res = calculate_dual_head_offset(
+                (dialog.spin_h1_x.value(), dialog.spin_h1_y.value()),
+                (dialog.spin_h2_x.value(), dialog.spin_h2_y.value()),
+            )
+            msg = (
+                f"Décalage X (Delta X) : {res['delta_x']} mm\n"
+                f"Décalage Y (Delta Y) : {res['delta_y']} mm\n"
+                f"Distance totale : {res['distance_mm']} mm\n\n"
+                f"Matrice d'alignement calculée avec succès."
+            )
+            QMessageBox.information(self, "Calibration Multi-Tête", msg)
+
+    def _on_gcode_simulation_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import GCodePreviewDialog
+        dialog = GCodePreviewDialog(self)
+        dialog.exec()
+
+    def _on_production_queue_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import ProductionQueueDialog
+        if not hasattr(self, "_prod_queue_mgr"):
+            from madgrav.tools.production_queue import ProductionQueueManager
+            self._prod_queue_mgr = ProductionQueueManager()
+        dialog = ProductionQueueDialog(self, manager=self._prod_queue_mgr)
+        dialog.exec()
+
+    def _on_nesting_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import NestingDialog
+        from madgrav.tools.nesting import nest_elements
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        # NOT elements.first_emphasized is None -- nesting fundamentally
+        # operates on MULTIPLE selected shapes, and first_emphasized
+        # becomes None precisely when several are emphasized with no
+        # prior single selection (see _on_frame_selection for the same
+        # fix and why). Count the real selection instead.
+        if not any(elements.elems(emphasized=True)):
+            self.status_bar.showMessage("Veuillez sélectionner au moins une forme à imbriquer.", 3000)
+            return
+        dialog = NestingDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # nest_elements() mutates each EXISTING node's matrix
+            # in-place (node.matrix.post_translate()) -- wrapped so
+            # Ctrl+Z reverts the whole layout in one step. (An earlier
+            # version of this comment suspected Node.__copy__ didn't
+            # deep-copy .matrix, based on a failing test -- turned out to
+            # be a bug in that TEST, not the product: RectNode.__copy__
+            # already deep-copies .matrix correctly, and the "failure"
+            # was actually the test holding a stale node reference across
+            # the undo call. See test_align_left_is_undoable's own
+            # comment for the corrected story.)
+            with elements.undoscope("Imbrication"):
+                packed, efficiency = nest_elements(
+                    elements,
+                    sheet_width_mm=dialog.spin_sheet_w.value(),
+                    sheet_height_mm=dialog.spin_sheet_h.value(),
+                    margin_mm=dialog.spin_margin.value(),
+                    rotation_steps=4 if dialog.check_rotation.isChecked() else 1,
+                )
+            elements.signal("refresh_scene", "Scene")
+            self.canvas.render_elements()
+            self._on_zoom_fit()
+            QMessageBox.information(
+                self, "Imbrication (Nesting)",
+                f"{packed} pièce(s) imbriquée(s) sur la plaque.\nEfficacité d'utilisation matière : {efficiency:.1f}%",
+            )
+
+    def _on_job_quote_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import JobQuoteDialog
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        dialog = JobQuoteDialog(self)
+        dialog.set_elements_service(elements)
+        dialog.exec()
+
+    def _on_smart_vectorize_dialog(self):
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        image_node = self._get_selected_image_node()
+        if image_node is None:
+            self.status_bar.showMessage("Veuillez sélectionner une image bitmap à vectoriser.", 3000)
+            return
+
+        from madgrav.qt.qt_laser_dialogs import SmartVectorizeDialog
+        dialog = SmartVectorizeDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        import numpy as np
+        from madgrav.tools.smart_vectorize import vectorize_bitmap_to_bezier
+
+        bounds = image_node.bounds
+        if not bounds:
+            self.status_bar.showMessage("Image sans dimensions valides.", 3000)
+            return
+
+        gray = image_node.image.convert("L")
+        img_np = np.array(gray)
+        px_h, px_w = img_np.shape[:2]
+        paths = vectorize_bitmap_to_bezier(img_np, threshold=dialog.spin_threshold.value())
+        if not paths:
+            QMessageBox.information(self, "Vectorisation Intelligente", "Aucun contour détecté avec ce seuil.")
+            return
+
+        # Traced paths are in pixel space (0..px_w, 0..px_h) -- scale and
+        # translate each new node's matrix (not the raw path coordinates,
+        # same idiom as print_and_cut.py/nesting.py) so the vector result
+        # lands exactly over the source image on the bed.
+        scale_x = (bounds[2] - bounds[0]) / px_w if px_w else 1.0
+        scale_y = (bounds[3] - bounds[1]) / px_h if px_h else 1.0
+        created = 0
+        # smart_vectorize/node_editor/galvo_hatching etc. never call
+        # elements.undoscope() themselves (confirmed empirically for
+        # "frame" -- none of madgrav/tools/*.py does) -- wrap the whole
+        # batch here so Ctrl+Z reverts all traced contours in one step.
+        with elements.undoscope("Vectorisation"):
+            for p in paths:
+                elem_node = elements.elem_branch.add(
+                    type="elem path",
+                    path=p,
+                    stroke=elements.default_stroke,
+                    label="Trace Vectorielle",
+                )
+                elem_node.matrix.post_scale(scale_x, scale_y)
+                elem_node.matrix.post_translate(bounds[0], bounds[1])
+                elem_node.altered()
+                created += 1
+
+        elements.signal("refresh_scene", "Scene")
+        self.canvas.render_elements()
+        QMessageBox.information(self, "Vectorisation Intelligente", f"{created} contour(s) vectorisé(s) et positionné(s) sur l'image d'origine.")
+
+    def _on_relief_3d_dialog(self):
+        image_node = self._get_selected_image_node()
+        if image_node is None:
+            self.status_bar.showMessage("Veuillez sélectionner une image bitmap pour l'aperçu relief 3D.", 3000)
+            return
+
+        import numpy as np
+        from madgrav.qt.qt_laser_dialogs import Relief3DPreviewDialog
+
+        gray = image_node.image.convert("L")
+        dialog = Relief3DPreviewDialog(self)
+        dialog.set_image(np.array(gray))
+        dialog.exec()
+
+    def _on_node_editor_dialog(self):
+        path_node = self._get_selected_path_node()
+        if path_node is None:
+            self.status_bar.showMessage("Veuillez sélectionner un tracé vectoriel à éditer.", 3000)
+            return
+
+        from madgrav.core.units import UNITS_PER_MM
+        from madgrav.qt.qt_laser_dialogs import NodeEditorDialog
+
+        live_path = path_node.path
+        dialog = NodeEditorDialog(self, path=live_path, units_per_mm=UNITS_PER_MM)
+
+        def _refresh():
+            # PathNode.path is a COMPUTED PROPERTY (self.geometry.as_path()),
+            # not a stored reference -- it returns a FRESH Path object on
+            # every access, so mutating the snapshot the dialog holds does
+            # NOT touch the node's actual geometry on its own. The setter
+            # (path_node.path = ...) is what commits it back via
+            # Geomstr.svg(new_path); confirmed empirically (a first attempt
+            # without this line left the document's bounds unchanged after
+            # a move/insert/delete).
+            elements = getattr(self.context, "elements", None)
+            # Wrapped per-callback (not once for the whole dialog session)
+            # so each individual move/insert/delete is its own undo step,
+            # matching what a user expects from Ctrl+Z here -- node_editor.py
+            # never calls elements.undoscope() itself.
+            if elements is not None:
+                with elements.undoscope("Édition de Nœud"):
+                    path_node.path = live_path
+                    path_node.altered()
+                elements.signal("refresh_scene", "Scene")
+            else:
+                path_node.path = live_path
+                path_node.altered()
+            self.canvas.render_elements()
+
+        dialog.on_changed = _refresh
+        dialog.exec()
+
+    def _on_frame_selection(self):
+        # "frame" is an existing kernel console command (shapes.py) that
+        # draws a red rectangle outline around the selection's bounding
+        # box as a real vector shape -- pure geometry, no laser motion
+        # involved, matching LightBurn's "Draw Frame" (not "Frame Job",
+        # which actually moves the head and isn't implemented here).
+        elements = getattr(self.context, "elements", None)
+        # NOT elements.first_emphasized is None -- that becomes None
+        # whenever MULTIPLE elements are emphasized with no prior single
+        # selection (elements.py: "it makes no sense to define a 'first'
+        # here, as all are equal"), which framing explicitly supports
+        # (a rubber-band multi-select). Count the real selection instead.
+        if elements is None or not any(elements.elems(emphasized=True)):
+            self.status_bar.showMessage("Veuillez sélectionner au moins un élément à encadrer.", 3000)
+            return
+        margin_mm, ok = QInputDialog.getDouble(
+            self, "Cadre de Sélection", "Marge autour de la sélection (mm) :", 0.0, -1000.0, 1000.0, 2
+        )
+        if not ok:
+            return
+        # "frame" (shapes.py) never calls elements.undoscope()/undo.mark()
+        # itself -- confirmed empirically the created rect survived a
+        # Ctrl+Z. Wrapping the call site here is the same idiom other
+        # undo-integrated commands use internally (e.g. clipboard.py's
+        # paste), just applied from the Qt layer instead of inside the
+        # command's own body.
+        with elements.undoscope("Cadre"):
+            ran = self._run_console(f"frame {margin_mm}mm {margin_mm}mm")
+        if ran:
+            self.canvas.render_elements()
+            self._update_selection_dependent_actions()
+            self.status_bar.showMessage("Cadre ajouté autour de la sélection.", 3000)
+
+    def _on_galvo_hatch_dialog(self):
+        path_node = self._get_selected_path_node()
+        if path_node is None:
+            self.status_bar.showMessage("Veuillez sélectionner un tracé vectoriel à hachurer.", 3000)
+            return
+
+        from madgrav.qt.qt_laser_dialogs import GalvoHatchDialog
+        dialog = GalvoHatchDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        from madgrav.tools.galvo_hatching import apply_galvo_hatch
+        # apply_galvo_hatch reads the source path's own bbox and returns
+        # hatch geometry already in that SAME coordinate space -- unlike
+        # smart_vectorize's pixel-space output, no extra scale/translate
+        # is needed before adding it as a sibling elem path.
+        hatch_path = apply_galvo_hatch(
+            path_node.path,
+            hatch_angle_deg=dialog.spin_angle.value(),
+            line_spacing_mm=dialog.spin_spacing.value(),
+            mode=dialog.combo_mode.currentText(),
+            wobble_frequency=dialog.spin_wobble_freq.value(),
+            wobble_amplitude_mm=dialog.spin_wobble_amp.value(),
+        )
+        if len(hatch_path) == 0:
+            QMessageBox.information(self, "Hachurage Galvo", "Aucun motif généré (tracé source sans dimensions valides).")
+            return
+
+        elements = getattr(self.context, "elements", None)
+        if elements is None:
+            return
+        # galvo_hatching.py never calls elements.undoscope() itself.
+        with elements.undoscope("Hachurage Galvo"):
+            elements.elem_branch.add(
+                type="elem path",
+                path=hatch_path,
+                stroke=elements.default_stroke,
+                label="Hachurage Galvo",
+            ).altered()
+        elements.signal("refresh_scene", "Scene")
+        self.canvas.render_elements()
+        self.status_bar.showMessage("Motif de hachurage galvo généré.", 3000)
+
+    def _on_halftone_studio_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import HalftoneStudioDialog
+        dialog = HalftoneStudioDialog(self)
+        dialog.exec()
+
+    def _on_topo_map_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import TopoMapDialog
+        dialog = TopoMapDialog(self)
+        dialog.exec()
+
+    def _on_mandala_generator_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import MandalaDialog
+        dialog = MandalaDialog(self)
+        dialog.exec()
+
+    def _on_web_remote_qr_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import WebRemoteQrDialog
+        dialog = WebRemoteQrDialog(self)
+        dialog.exec()
+
+    def _on_inlay_wizard_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import InlayWizardDialog
+        dialog = InlayWizardDialog(self)
+        dialog.exec()
+
+    def _on_tslot_box_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import TSlotBoxDialog
+        dialog = TSlotBoxDialog(self)
+        dialog.exec()
+
+    def _on_scrap_finder_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import ScrapFinderDialog
+        dialog = ScrapFinderDialog(self)
+        dialog.exec()
+
+    def _on_trueshape_nesting_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import TrueShapeNestingDialog
+        dialog = TrueShapeNestingDialog(self)
+        dialog.exec()
+
+    def _on_material_matrix_test_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import MaterialMatrixTestDialog
+        dialog = MaterialMatrixTestDialog(self)
+        dialog.exec()
+
+    def _on_laser_timeline_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import LaserTimelineDialog
+        dialog = LaserTimelineDialog(self)
+        dialog.exec()
+
+    def _on_workshop_kiosk_dialog(self):
+        from madgrav.qt.qt_laser_dialogs import WorkshopKioskWindow
+        self._kiosk_window = WorkshopKioskWindow(self)
+        self._kiosk_window.showFullScreen()
+
+
 

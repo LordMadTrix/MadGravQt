@@ -1,74 +1,147 @@
-"""
-Production Queue & Workshop Kiosk Mode Manager for MadGrav.
-Manages batch manufacturing queues, barcode job lookup, and daily output metrics.
-"""
-
 import time
 import uuid
+from typing import Optional, List, Dict, Any
+
+
+class ProductionJob:
+    """Represents a laser manufacturing job routed to a specific machine."""
+
+    def __init__(
+        self,
+        name: str,
+        file_path: str = "",
+        target_machine_id: str = "laser_default",
+        quantity: int = 1,
+        priority: int = 1,
+        estimated_sec: float = 60.0,
+        barcode: Optional[str] = None,
+        job_id: Optional[str] = None,
+        status: str = "En attente",
+    ):
+        self.job_id = job_id or str(uuid.uuid4())[:8]
+        self.id = self.job_id
+        self.name = name
+        self.file_path = file_path
+        self.target_machine_id = target_machine_id
+        self.quantity = quantity
+        self.priority = priority
+        self.estimated_sec = estimated_sec
+        self.barcode = barcode or f"JOB-{self.job_id.upper()}"
+        self.status = status
+        self.added_at = time.time()
+        self.completed_at = None
+        self.duration_sec = 0.0
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.job_id,
+            "job_id": self.job_id,
+            "name": self.name,
+            "file_path": self.file_path,
+            "target_machine_id": self.target_machine_id,
+            "quantity": self.quantity,
+            "priority": self.priority,
+            "barcode": self.barcode,
+            "status": self.status,
+            "estimated_sec": self.estimated_sec,
+            "duration_sec": self.duration_sec,
+            "added_at": self.added_at,
+            "completed_at": self.completed_at,
+        }
 
 
 class ProductionQueueManager:
-    """Batch job queue manager for workshop and kiosk production."""
+    """Batch job queue manager for multi-machine laser production."""
 
     def __init__(self):
-        self.queue = []
-        self.completed_jobs = []
+        self.jobs: List[ProductionJob] = []
+        self.completed_jobs: List[ProductionJob] = []
 
-    def add_job(self, job_name, file_path, quantity=1, priority=1, barcode=None):
+    @property
+    def queue(self) -> List[ProductionJob]:
+        return self.jobs
+
+    def add_job(
+        self,
+        job_name: str,
+        file_path: str = "",
+        target_machine_id: str = "laser_default",
+        quantity: int = 1,
+        priority: int = 1,
+        estimated_sec: float = 60.0,
+        barcode: Optional[str] = None,
+    ) -> ProductionJob:
         """Enqueue a new job for manufacturing."""
-        job_id = str(uuid.uuid4())[:8]
-        if not barcode:
-            barcode = f"JOB-{job_id.upper()}"
-
-        job = {
-            "id": job_id,
-            "name": job_name,
-            "file_path": file_path,
-            "quantity": quantity,
-            "priority": priority,
-            "barcode": barcode,
-            "status": "queued",
-            "added_at": time.time()
-        }
-        self.queue.append(job)
-        self.queue.sort(key=lambda j: j["priority"], reverse=True)
+        job = ProductionJob(
+            name=job_name,
+            file_path=file_path,
+            target_machine_id=target_machine_id,
+            quantity=quantity,
+            priority=priority,
+            estimated_sec=estimated_sec,
+            barcode=barcode,
+        )
+        self.jobs.append(job)
+        self.jobs.sort(key=lambda j: j.priority, reverse=True)
         return job
 
-    def get_next_job(self):
+    def get_jobs_for_machine(self, machine_id: str) -> List[ProductionJob]:
+        """Fetch all queued jobs assigned to a specific laser machine."""
+        return [j for j in self.jobs if j.target_machine_id == machine_id]
+
+    def get_next_job(self, machine_id: Optional[str] = None) -> Optional[ProductionJob]:
         """Fetch highest-priority pending job."""
-        pending = [j for j in self.queue if j["status"] == "queued"]
-        if pending:
-            job = pending[0]
-            job["status"] = "in_progress"
-            return job
+        for job in self.jobs:
+            if job.status in ("queued", "En attente"):
+                if machine_id is None or job.target_machine_id == machine_id:
+                    job.status = "En cours"
+                    return job
         return None
 
-    def mark_job_completed(self, job_id, duration_sec):
+    def update_job_status(self, job_id: str, status: str) -> bool:
+        """Update status of a specific job."""
+        for j in self.jobs:
+            if j.job_id == job_id or j.id == job_id:
+                j.status = status
+                return True
+        return False
+
+    def mark_job_completed(self, job_id: str, duration_sec: float) -> bool:
         """Mark a job as finished and record production stats."""
-        for j in self.queue:
-            if j["id"] == job_id:
-                j["status"] = "completed"
-                j["duration_sec"] = duration_sec
-                j["completed_at"] = time.time()
+        for j in self.jobs:
+            if j.job_id == job_id or j.id == job_id:
+                j.status = "Terminé"
+                j.duration_sec = duration_sec
+                j.completed_at = time.time()
                 self.completed_jobs.append(j)
                 return True
         return False
 
-    def lookup_job_by_barcode(self, barcode_string):
+    def lookup_job_by_barcode(self, barcode_string: str) -> Optional[ProductionJob]:
         """Retrieve job matching scanned barcode."""
-        for j in self.queue:
-            if j["barcode"] == barcode_string:
+        for j in self.jobs:
+            if j.barcode == barcode_string:
                 return j
         return None
 
-    def export_production_summary(self):
+    def export_production_summary(self) -> Dict[str, Any]:
         """Return workshop metrics summary."""
-        total_time = sum(j.get("duration_sec", 0.0) for j in self.completed_jobs)
-        total_parts = sum(j.get("quantity", 1) for j in self.completed_jobs)
+        total_time = sum(j.duration_sec for j in self.completed_jobs)
+        total_parts = sum(j.quantity for j in self.completed_jobs)
         return {
-            "queued_count": len([j for j in self.queue if j["status"] == "queued"]),
+            "queued_count": len([j for j in self.jobs if j.status in ("queued", "En attente")]),
             "completed_count": len(self.completed_jobs),
             "total_parts_produced": total_parts,
             "total_run_time_sec": round(total_time, 1),
-            "avg_part_time_sec": round(total_time / total_parts, 1) if total_parts > 0 else 0.0
+            "avg_part_time_sec": round(total_time / total_parts, 1) if total_parts > 0 else 0.0,
         }
+

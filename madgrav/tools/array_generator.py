@@ -71,14 +71,18 @@ def generate_grid_array(
 
                 # Copy node and translate
                 copy_node = copy(node)
-                if hasattr(copy_node, "matrix") and copy_node.matrix is not None:
-                    copy_node.matrix *= Matrix.translate(dx, dy)
-                if hasattr(copy_node, "path") and copy_node.path is not None:
-                    copy_node.path = copy_node.path * Matrix.translate(dx, dy)
-                elif hasattr(copy_node, "shape") and copy_node.shape is not None:
-                    copy_node.shape = copy_node.shape * Matrix.translate(dx, dy)
+                if getattr(copy_node, "matrix", None) is not None:
+                    copy_node.matrix = Matrix(copy_node.matrix)
+                    copy_node.matrix.post_translate(dx, dy)
+                else:
+                    copy_node.matrix = Matrix.translate(dx, dy)
 
-                node.parent.add_node(copy_node)
+                copy_node.altered()
+                parent = getattr(node, "parent", None)
+                if parent is not None:
+                    parent.add_node(copy_node)
+                else:
+                    elements_service.elem_branch.add_node(copy_node)
                 created_nodes.append(copy_node)
 
     elements_service.signal("tree_changed")
@@ -135,14 +139,18 @@ def generate_circular_array(
             M.post_translate(cx_units, cy_units)
 
             copy_node = copy(node)
-            if hasattr(copy_node, "matrix") and copy_node.matrix is not None:
+            if getattr(copy_node, "matrix", None) is not None:
+                copy_node.matrix = Matrix(copy_node.matrix)
                 copy_node.matrix *= M
-            if hasattr(copy_node, "path") and copy_node.path is not None:
-                copy_node.path = copy_node.path * M
-            elif hasattr(copy_node, "shape") and copy_node.shape is not None:
-                copy_node.shape = copy_node.shape * M
+            else:
+                copy_node.matrix = Matrix(M)
 
-            node.parent.add_node(copy_node)
+            copy_node.altered()
+            parent = getattr(node, "parent", None)
+            if parent is not None:
+                parent.add_node(copy_node)
+            else:
+                elements_service.elem_branch.add_node(copy_node)
             created_nodes.append(copy_node)
 
     elements_service.signal("tree_changed")

@@ -20,9 +20,33 @@ def _get_node_bounds(node):
     return None
 
 
-def nest_elements(elements, sheet_width_mm, sheet_height_mm, margin_mm=2.0, rotation_steps=4):
+def _rotated_bbox_width(bounds, angle_rad):
+    """Width of the axis-aligned bbox of `bounds`' 4 corners after
+    rotating them by angle_rad around the bbox's own center -- a cheap
+    analytic estimate used only to CHOOSE the best trial angle, without
+    mutating the node once per candidate."""
+    min_x, min_y, max_x, max_y = bounds
+    cx = (min_x + max_x) / 2.0
+    cy = (min_y + max_y) / 2.0
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    xs = []
+    for x, y in ((min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)):
+        dx, dy = x - cx, y - cy
+        xs.append(cx + dx * cos_a - dy * sin_a)
+    return max(xs) - min(xs)
+
+
+def nest_elements(elements, sheet_width_mm, sheet_height_mm, margin_mm=2.0, rotation_steps=1):
     """
     Nest a list of elements onto a target sheet.
+
+    rotation_steps=1 (default) never rotates a piece, matching every
+    caller written before this parameter did anything. rotation_steps=N>1
+    tries N evenly-spaced orientations per piece and keeps whichever is
+    narrowest, packing tighter at the cost of possibly rotating the
+    piece's on-bed orientation (skip this for text/engravings where
+    orientation matters).
+
     Returns (packed_count, efficiency_percent).
     """
     nodes = [n for n in elements.elems() if getattr(n, "emphasized", True)]
@@ -42,10 +66,25 @@ def nest_elements(elements, sheet_width_mm, sheet_height_mm, margin_mm=2.0, rota
         if not bounds:
             continue
 
+        if rotation_steps > 1:
+            best_angle = 0.0
+            best_width = bounds[2] - bounds[0]
+            for i in range(1, rotation_steps):
+                angle = i * (2.0 * math.pi / rotation_steps)
+                width = _rotated_bbox_width(bounds, angle)
+                if width < best_width:
+                    best_width, best_angle = width, angle
+            if best_angle != 0.0:
+                min_x, min_y, max_x, max_y = bounds
+                cx = (min_x + max_x) / 2.0
+                cy = (min_y + max_y) / 2.0
+                node.matrix.post_rotate(best_angle, cx, cy)
+                node.modified()
+                bounds = node.bounds
+
         min_x, min_y, max_x, max_y = bounds
         w = max_x - min_x
         h = max_y - min_y
-
 
         if curr_x + w + margin_mm > sheet_width_mm:
             curr_x = margin_mm

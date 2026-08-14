@@ -123,3 +123,70 @@ def add_lead_in_out(path, lead_in_len_mm=2.0, lead_out_len_mm=2.0, lead_angle_de
     new_path.line(p_out_end)
 
     return new_path
+
+
+def apply_kerf_and_lead_to_selection(
+    elements_service,
+    nodes=None,
+    kerf_mm=0.1,
+    mode="outer",
+    lead_in_mm=2.0,
+    lead_out_mm=2.0,
+    lead_angle_deg=45.0,
+):
+    """
+    Apply kerf compensation and lead-in/lead-out to selected elements.
+
+    :param elements_service: The elements service (`kernel.elements`)
+    :param nodes: Optional list of nodes to process
+    :param kerf_mm: Beam radius offset in mm
+    :param mode: 'outer' or 'inner'
+    :param lead_in_mm: Length of lead-in in mm
+    :param lead_out_mm: Length of lead-out in mm
+    :param lead_angle_deg: Lead angle in degrees
+    :return: Count of updated nodes
+    """
+    if nodes is None:
+        nodes = list(elements_service.elems(emphasized=True))
+    updated_count = 0
+
+    for node in nodes:
+        node_path = getattr(node, "path", None)
+        if node_path is None and hasattr(node, "as_geometry"):
+            try:
+                node_path = node.as_geometry().as_path()
+            except Exception:
+                node_path = None
+
+        if node_path is not None:
+            if kerf_mm != 0.0:
+                node_path = apply_kerf_offset(node_path, kerf_mm=kerf_mm, mode=mode)
+            if lead_in_mm > 0.0 or lead_out_mm > 0.0:
+                node_path = add_lead_in_out(
+                    node_path,
+                    lead_in_len_mm=lead_in_mm,
+                    lead_out_len_mm=lead_out_mm,
+                    lead_angle_deg=lead_angle_deg,
+                )
+
+            if hasattr(node, "path"):
+                node.path = node_path
+            else:
+                parent = getattr(node, "parent", None) or elements_service.elem_branch
+                new_node = elements_service.elem_branch.add(
+                    type="elem path",
+                    path=node_path,
+                    stroke=getattr(node, "stroke", elements_service.default_stroke),
+                    stroke_width=getattr(node, "stroke_width", 1000.0),
+                )
+                if parent is not None and hasattr(parent, "remove_node"):
+                    parent.remove_node(node)
+                node = new_node
+            node.altered()
+            updated_count += 1
+
+    if updated_count > 0:
+        elements_service.signal("tree_changed")
+        elements_service.signal("refresh_scene")
+
+    return updated_count

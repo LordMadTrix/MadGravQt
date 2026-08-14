@@ -46,12 +46,14 @@ if not mimetypes.inited:
 
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 from math import isinf
 from socketserver import ThreadingMixIn
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
 from madgrav.kernel import Module
+from madgrav.network.web_remote_assets import get_mobile_remote_html
 
 # ThreadingHTTPServer was added in Python 3.7
 # For Python 3.6 compatibility, create it manually
@@ -117,6 +119,13 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
 
+    def send_json_response(self, data: Any, status_code: int = 200) -> None:
+        """Send JSON response with proper headers"""
+        content = json.dumps(data).encode("utf-8")
+        self.send_response(status_code)
+        self.send_response_headers("application/json; charset=utf-8", len(content))
+        self.wfile.write(content)
+
     def send_html_response(self, html_content: str, status_code: int = 200) -> None:
         """Send HTML response with proper headers"""
         content = html_content.encode("utf-8")
@@ -126,7 +135,6 @@ class WebRequestHandler(BaseHTTPRequestHandler):
 
     def send_error_page(self, status_code: int, message: str) -> None:
         """Send a formatted error page"""
-        # HTML-escape message to prevent XSS
         safe_message = html_module.escape(message, quote=True)
         html_string = f"""<!DOCTYPE html>
 <html>
@@ -146,11 +154,32 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.send_error_page(500, "Server not properly initialized")
                 return
 
-            # GET must stay side-effect-free (no command execution): a plain
-            # <img>/<a> tag from any other page can trigger a GET with zero
-            # user interaction, so command execution is POST-only, guarded by
-            # build_html_page's CSRF token check.
-            html_content = server_instance.build_html_page()
+            parsed = urlparse(self.path)
+            path = parsed.path
+
+            if path == "/api/status":
+                root = getattr(server_instance.context, "root", server_instance.context)
+                dev_name = str(getattr(root, "device", "Laser") or "Laser")
+                status_info = {
+                    "status": "Prêt",
+                    "device": dev_name,
+                    "x": float(getattr(root, "current_x", 0.0) or 0.0),
+                    "y": float(getattr(root, "current_y", 0.0) or 0.0),
+                    "speed": 100,
+                    "power": 100,
+                }
+                self.send_json_response(status_info)
+                return
+
+            if path == "/legacy":
+                html_content = server_instance.build_html_page()
+                self.send_html_response(html_content)
+                return
+
+            # Default: Serve responsive mobile dark-mode touch application
+            root = getattr(server_instance.context, "root", server_instance.context)
+            dev_name = str(getattr(root, "device", "Laser") or "Laser")
+            html_content = get_mobile_remote_html(server_instance.csrf_token, dev_name)
             self.send_html_response(html_content)
 
         except Exception as e:
@@ -165,30 +194,79 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self.send_error_page(500, "Server not properly initialized")
                 return
 
-            # Read POST data
             content_length = int(self.headers.get("Content-Length", 0))
-            post_data = self.rfile.read(content_length).decode("utf-8")
+            post_raw = self.rfile.read(content_length).decode("utf-8")
+            content_type = self.headers.get("Content-Type", "")
 
-            # Parse POST parameters
-            post_params = parse_qs(post_data)
+            parsed = urlparse(self.path)
+            path = parsed.path
 
-            # CSRF check: every command-executing POST must carry the token
-            # embedded in the page we served. A cross-origin page can submit
-            # a POST here (forms aren't blocked by CORS) but can't read our
-            # HTML to learn this per-instance token, so it can't forge one.
+            # JSON REST API handling
+            if "application/json" in content_type or path.startswith("/api/"):
+                try:
+                    payload = json.loads(post_raw) if post_raw else {}
+                except json.JSONDecodeError:
+                    self.send_json_response({"error": "Invalid JSON"}, 400)
+                    return
+
+                submitted_token = payload.get("csrf_token", "")
+                if not secrets.compare_digest(submitted_token, server_instance.csrf_token):
+                    self.send_json_response({"error": "Invalid or missing CSRF token"}, 403)
+                    return
+
+                if path == "/api/jog":
+                    axis = str(payload.get("axis", "X")).upper()
+                    dist = float(payload.get("distance", 0.0))
+                    if axis == "X":
+                        server_instance.send_command(f"move {dist}mm 0mm\n")
+                    elif axis == "Y":
+                        server_instance.send_command(f"move 0mm {dist}mm\n")
+                    elif axis == "Z":
+                        server_instance.send_command(f"zmove {dist}mm\n")
+                    self.send_json_response({"success": True, "message": f"Jog {axis} {dist}mm"})
+                    return
+
+                elif path == "/api/control":
+                    action = str(payload.get("action", "")).lower()
+                    if action == "home":
+                        server_instance.send_command("home\n")
+                    elif action == "origin":
+                        server_instance.send_command("move 0mm 0mm\n")
+                    elif action == "frame":
+                        server_instance.send_command("frame\n")
+                    elif action == "pulse":
+                        server_instance.send_command("pulse 50\n")
+                    elif action == "start":
+                        server_instance.send_command("start\n")
+                    elif action == "pause":
+                        server_instance.send_command("pause\n")
+                    elif action in ("stop", "estop"):
+                        server_instance.send_command("estop\n")
+                    self.send_json_response({"success": True, "action": action, "message": f"Action '{action}' executed"})
+                    return
+
+                elif path == "/api/console":
+                    cmd = str(payload.get("cmd", ""))
+                    server_instance.send_command(cmd)
+                    self.send_json_response({"success": True, "message": "Command executed"})
+                    return
+
+                self.send_json_response({"error": f"Unknown endpoint: {path}"}, 404)
+                return
+
+            # Form POST legacy handling
+            post_params = parse_qs(post_raw)
             submitted_token = post_params.get("csrf_token", [""])[0]
             if not secrets.compare_digest(submitted_token, server_instance.csrf_token):
                 self.send_error_page(403, "Invalid or missing CSRF token.")
                 return
 
-            # Check for job command first
             if "job_cmd" in post_params:
                 job_cmd = post_params["job_cmd"][0]
                 try:
                     job_idx_str, operation = job_cmd.split(":", 1)
                     job_idx = int(job_idx_str)
                     result = server_instance.handle_job_command(job_idx, operation)
-                    # Display result as message without executing as command
                     html_content = server_instance.build_html_page(message=result)
                     self.send_html_response(html_content)
                 except (ValueError, IndexError) as e:
@@ -197,12 +275,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     self.send_html_response(html_content)
                 return
 
-            # Check for regular console command
             command = None
             if "cmd" in post_params:
                 command = post_params["cmd"][0]
 
-            # Generate response
             html_content = server_instance.build_html_page(command)
             self.send_html_response(html_content)
 
@@ -414,11 +490,34 @@ class WebServer(Module):
         except Exception as e:
             return f"Error: {str(e)}"
 
+    @property
+    def actual_port(self) -> int:
+        """Returns the actual bound port (useful when port 0 is used for auto-assignment)."""
+        if self.httpd and hasattr(self.httpd, "server_address"):
+            return self.httpd.server_address[1]
+        return self.port
+
+    def start_server(self, bind_ip: Optional[str] = None, port: Optional[int] = None) -> None:
+        """Starts or restarts the HTTP server with given bind IP and port."""
+        if bind_ip is not None:
+            self.bind_address = bind_ip
+        if port is not None:
+            self.port = port
+        if self.httpd is None:
+            self.context.threaded(self.run_server, thread_name=f"web-{self.port}", daemon=True)
+
+    def stop_server(self) -> None:
+        """Stop the server cleanly."""
+        self.stop()
+
     def stop(self) -> None:
         """Stop the server"""
         self.state = "terminate"
         if self.httpd:
-            self.httpd.shutdown()
+            try:
+                self.httpd.shutdown()
+            except Exception:
+                pass
 
     def module_close(self, *args: Any, **kwargs: Any) -> None:
         """Clean up when module closes"""

@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MadGravQt - Station de Contrôle Laser Professionnelle & Suite Maker</title>
+  <meta name="description" content="Logiciel libre et moderne de découpe et gravure laser multi-machines avec IA de vision, nesting 2D, générateurs paramétriques et télécommande mobile sans fil.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #090d16;
+      --bg-card: rgba(18, 26, 43, 0.75);
+      --bg-card-hover: rgba(28, 40, 65, 0.9);
+      --border-color: rgba(255, 255, 255, 0.1);
+      --border-glow: rgba(56, 189, 248, 0.3);
+      --laser-cyan: #38bdf8;
+      --laser-emerald: #10b981;
+      --laser-purple: #a855f7;
+      --laser-amber: #f59e0b;
+      --laser-red: #ef4444;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      line-height: 1.6;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.12) 0%, transparent 40%),
+        radial-gradient(circle at 85% 40%, rgba(168, 85, 247, 0.12) 0%, transparent 40%),
+        radial-gradient(circle at 50% 85%, rgba(16, 185, 129, 0.1) 0%, transparent 50%);
+      background-attachment: fixed;
+    }
+
+    /* Navbar */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      backdrop-filter: blur(16px);
+      background: rgba(9, 13, 22, 0.85);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .nav-container {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem 2rem;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.5rem;
+      font-weight: 800;
+      color: var(--text-main);
+      text-decoration: none;
+    }
+
+    .logo span {
+      background: linear-gradient(135deg, var(--laser-cyan), var(--laser-purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 1.5rem;
+      align-items: center;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover {
+      color: var(--laser-cyan);
+    }
+
+    .btn-github {
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: white !important;
+      padding: 0.6rem 1.25rem;
+      border-radius: 9999px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .btn-github:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
+    }
+
+    /* Hero */
+    .hero {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 5rem 2rem 4rem;
+      text-align: center;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid var(--border-glow);
+      border-radius: 9999px;
+      color: var(--laser-cyan);
+      font-size: 0.875rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+    }
+
+    .hero h1 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 3.5rem;
+      font-weight: 800;
+      line-height: 1.15;
+      margin-bottom: 1.5rem;
+    }
+
+    .hero h1 .gradient-text {
+      background: linear-gradient(135deg, #38bdf8 0%, #a855f7 50%, #34d399 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero p {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      max-width: 800px;
+      margin: 0 auto 2.5rem;
+    }
+
+    .hero-actions {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 4rem;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--laser-cyan), #2563eb);
+      color: white;
+      padding: 0.875rem 2rem;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      text-decoration: none;
+      transition: all 0.2s;
+      box-shadow: 0 4px 20px rgba(56, 189, 248, 0.3);
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 25px rgba(56, 189, 248, 0.5);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      color: white;
+      padding: 0.875rem 2rem;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 1.1rem;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    /* Interactive Features Section */
+    .section-title {
+      text-align: center;
+      margin-bottom: 3rem;
+    }
+
+    .section-title h2 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+    }
+
+    .section-title p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+    }
+
+    /* Tabs */
+    .tabs-container {
+      max-width: 1280px;
+      margin: 0 auto 5rem;
+      padding: 0 2rem;
+    }
+
+    .tabs-header {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      margin-bottom: 2.5rem;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      color: var(--text-muted);
+      padding: 0.75rem 1.5rem;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .tab-btn.active {
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(168, 85, 247, 0.2));
+      border-color: var(--laser-cyan);
+      color: white;
+      box-shadow: 0 0 15px rgba(56, 189, 248, 0.2);
+    }
+
+    .tab-content {
+      display: none;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 2rem;
+    }
+
+    .tab-content.active {
+      display: grid;
+      animation: fadeIn 0.3s ease-in-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 2rem;
+      backdrop-filter: blur(12px);
+      transition: all 0.3s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-glow);
+      transform: translateY(-4px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+
+    .card-icon {
+      font-size: 2.5rem;
+      margin-bottom: 1.25rem;
+      display: inline-block;
+    }
+
+    .card h3 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin-bottom: 0.75rem;
+    }
+
+    .card p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .card-tag {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--laser-cyan);
+    }
+
+    /* Hardware Matrix */
+    .hardware-section {
+      background: rgba(18, 26, 43, 0.5);
+      border-top: 1px solid var(--border-color);
+      border-bottom: 1px solid var(--border-color);
+      padding: 5rem 2rem;
+    }
+
+    .hardware-grid {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .hw-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 1.5rem;
+      text-align: center;
+    }
+
+    .hw-card h4 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+    }
+
+    .hw-card p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    /* Quickstart */
+    .quickstart {
+      max-width: 900px;
+      margin: 5rem auto;
+      padding: 0 2rem;
+    }
+
+    .code-box {
+      background: #05070d;
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 1.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.95rem;
+      color: #38bdf8;
+      overflow-x: auto;
+      position: relative;
+    }
+
+    .code-comment {
+      color: #64748b;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border-color);
+      padding: 3rem 2rem;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    footer a {
+      color: var(--laser-cyan);
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navbar -->
+  <header>
+    <div class="nav-container">
+      <a href="#" class="logo">
+        ⚡ <span>MadGravQt</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="#features">Fonctionnalités</a></li>
+        <li><a href="#hardware">Machines</a></li>
+        <li><a href="#quickstart">Installation</a></li>
+        <li><a href="https://github.com/LordMadTrix/MadGravQt" target="_blank" class="btn-github">⭐ GitHub</a></li>
+      </ul>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <main>
+    <section class="hero">
+      <div class="badge">🚀 Version 0.9.9000 &bull; Suite Complète Pro & Maker</div>
+      <h1>Station de Contrôle Laser Haute Performance <br><span class="gradient-text">& Suite Maker Vectorielle</span></h1>
+      <p>
+        Pilotez vos machines laser K40, GRBL, Ruida, Moshi et Galvo avec une interface moderne en PyQt6.
+        Intègre une IA de vision pour chutes de matière, du nesting 2D, des générateurs d'incrustation et une télécommande mobile Wi-Fi sans fil.
+      </p>
+      <div class="hero-actions">
+        <a href="https://github.com/LordMadTrix/MadGravQt" target="_blank" class="btn-primary">📦 Obtenir sur GitHub</a>
+        <a href="#features" class="btn-secondary">Explorer les Outils</a>
+      </div>
+    </section>
+
+    <!-- Interactive Features Tabs -->
+    <section class="tabs-container" id="features">
+      <div class="section-title">
+        <h2>Une Suite Complète de 4 Piliers Majeurs</h2>
+        <p>Tout ce dont un atelier laser a besoin, du dessin paramétrique à l'usinage en série.</p>
+      </div>
+
+      <div class="tabs-header">
+        <button class="tab-btn active" onclick="switchTab('maker')">🧩 Maker & Incrustation</button>
+        <button class="tab-btn" onclick="switchTab('vision')">👁️ Vision & Calage Intelligent</button>
+        <button class="tab-btn" onclick="switchTab('optimization')">⚡ Optimisation & Matériaux</button>
+        <button class="tab-btn" onclick="switchTab('workshop')">📱 Atelier & Télécommande Web</button>
+      </div>
+
+      <!-- Tab 1: Maker -->
+      <div id="tab-maker" class="tab-content active">
+        <div class="card">
+          <div class="card-icon">🧩</div>
+          <h3>Assistant Marqueterie & Incrustation (Inlay)</h3>
+          <p>Calcul automatique des décalages de kerf pour pièces mâles et femelles avec compensation du jeu mécanique d'assemblage pour bois, PMMA ou cuir.</p>
+          <div class="card-tags"><span class="card-tag">Kerf Automatique</span><span class="card-tag">Marqueterie</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🔩</div>
+          <h3>Boîtes Démontables à Écrous Captifs (T-Slot)</h3>
+          <p>Générateur paramétrique de boîtes 3D à fentes en T pour vis et écrous hexagonaux normalisés M3, M4 et M5.</p>
+          <div class="card-tags"><span class="card-tag">M3/M4/M5</span><span class="card-tag">Finger Joints</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🪵</div>
+          <h3>Charnières Vivantes (Living Hinges)</h3>
+          <p>Générateur de motifs de pliage flexible découpé pour courber le contreplaqué et l'acrylique sans casser.</p>
+          <div class="card-tags"><span class="card-tag">Courbure Bois</span><span class="card-tag">Flex Cut</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🗺️</div>
+          <h3>Cartes Topographiques 3D Multi-Couches</h3>
+          <p>Découpe vectorielle multi-strates empilées avec lignes de niveau pour reliefs géographiques réalistes.</p>
+          <div class="card-tags"><span class="card-tag">Topo 3D</span><span class="card-tag">Multi-Layers</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🌸</div>
+          <h3>Générateur de Mandalas & Rosaces</h3>
+          <p>Création paramétrique de rosaces sacrées géométriques et motifs floraux à symétrie radiale.</p>
+          <div class="card-tags"><span class="card-tag">Symétrie Radiale</span><span class="card-tag">Vector Art</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🖼️</div>
+          <h3>Studio Gravure Photo & Demi-Teintes</h3>
+          <p>Algorithmes de tramage avancés (Floyd-Steinberg, Atkinson, Halftone cercles et lignes) pour gravure photo ultra-détaillée.</p>
+          <div class="card-tags"><span class="card-tag">Dithering</span><span class="card-tag">Photo Engraving</span></div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Vision -->
+      <div id="tab-vision" class="tab-content">
+        <div class="card">
+          <div class="card-icon">🔍</div>
+          <h3>Détecteur de Chutes (Scrap Finder)</h3>
+          <p>Analyse d'image par caméra pour détourer automatiquement les chutes de matière exploitables et y nicher vos découpes.</p>
+          <div class="card-tags"><span class="card-tag">Zéro Déchet</span><span class="card-tag">Computer Vision</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">📍</div>
+          <h3>Print & Cut / Repères Fiduciels</h3>
+          <p>Calage ultra-précis 2 points et 4 points pour découper des planches préalablement imprimées avec compensation d'échelle et rotation.</p>
+          <div class="card-tags"><span class="card-tag">Print & Cut</span><span class="card-tag">Transformation Affine</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">📷</div>
+          <h3>Superposition Caméra en Direct (Live Bed Overlay)</h3>
+          <p>Projection temps réel de l'image de la caméra calibrée sur l'espace de travail pour placer vos pièces au millimètre.</p>
+          <div class="card-tags"><span class="card-tag">Overhead Cam</span><span class="card-tag">Calibration ArUco</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🎯</div>
+          <h3>Calibration Multi-Tête & Galvo</h3>
+          <p>Assistant de calibration géométrique pour machines laser à double tête et têtes galvo miroir.</p>
+          <div class="card-tags"><span class="card-tag">Dual Head</span><span class="card-tag">Galvo Mirrors</span></div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Optimization -->
+      <div id="tab-optimization" class="tab-content">
+        <div class="card">
+          <div class="card-icon">🧩</div>
+          <h3>Imbrication 2D Avancée (True-Shape Nesting)</h3>
+          <p>Algorithme de placement multi-pièces avec gestion des rotations libres ou angulaires pour minimiser les pertes de matière.</p>
+          <div class="card-tags"><span class="card-tag">Nesting 2D</span><span class="card-tag">Optimisation Panneau</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">📊</div>
+          <h3>Matrice de Test Matériaux Pro</h3>
+          <p>Génération automatique d'une grille paramétrique vitesse/puissance avec étiquettes gravées automatiquement.</p>
+          <div class="card-tags"><span class="card-tag">Calibration Puissance</span><span class="card-tag">Speed Grid</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🔄</div>
+          <h3>Optimiseur d'Ordre de Découpe (Inner-First)</h3>
+          <p>Réordonnancement automatique des tracés pour découper les trous intérieurs avant les contours extérieurs et minimiser les trajets rapides G0.</p>
+          <div class="card-tags"><span class="card-tag">Inner-First</span><span class="card-tag">Gain de Temps</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🏷️</div>
+          <h3>Texte Variable & Fusion CSV / Excel</h3>
+          <p>Génération automatique de séries d'étiquettes, trophées ou plaques d'identification avec compteurs et colonnes de tableur.</p>
+          <div class="card-tags"><span class="card-tag">Sérialisation</span><span class="card-tag">Import Excel</span></div>
+        </div>
+      </div>
+
+      <!-- Tab 4: Workshop -->
+      <div id="tab-workshop" class="tab-content">
+        <div class="card">
+          <div class="card-icon">📱</div>
+          <h3>Télécommande Mobile Web (QR Code)</h3>
+          <p>Scannez le QR Code depuis votre smartphone (iOS/Android) pour contrôler le laser à distance sans aucune installation d'application.</p>
+          <div class="card-tags"><span class="card-tag">Smartphone Wi-Fi</span><span class="card-tag">QR Code</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">⏱️</div>
+          <h3>Visualiseur Temporel & Accélération</h3>
+          <p>Simulation précise du temps d'usinage basée sur les profils d'accélération trapézoïdale réels de la machine.</p>
+          <div class="card-tags"><span class="card-tag">Accélération Trapézoïdale</span><span class="card-tag">Timeline</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🖥️</div>
+          <h3>Mode Kiosque Tactile Atelier (F11)</h3>
+          <p>Interface grand format tactile avec boutons extra-larges (Lancer, Cadrer, Pause, Arrêt d'urgence) pensée pour opérateurs en atelier.</p>
+          <div class="card-tags"><span class="card-tag">Touch Screen</span><span class="card-tag">Sécurité Atelier</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">🏭</div>
+          <h3>File d'Attente de Production Multi-Machines</h3>
+          <p>Gestionnaire de file de production permettant de dispatcher des lots de pièces sur plusieurs lasers simultanément.</p>
+          <div class="card-tags"><span class="card-tag">Spooler</span><span class="card-tag">Multi-Laser</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Hardware Compatibility -->
+    <section class="hardware-section" id="hardware">
+      <div class="section-title">
+        <h2>Compatibilité Matérielle Universelle</h2>
+        <p>Support natif d'une large gamme de contrôleurs laser industriels et DIY.</p>
+      </div>
+
+      <div class="hardware-grid">
+        <div class="hw-card">
+          <h4>K40 (Lihuiyu)</h4>
+          <p>M2-Nano, M3, B1 et contrôleurs CH341 USB</p>
+        </div>
+        <div class="hw-card">
+          <h4>GRBL & G-Code</h4>
+          <p>GRBL 1.1, Smoothieware, Marlin, ESP32 Laser</p>
+        </div>
+        <div class="hw-card">
+          <h4>Ruida DSP</h4>
+          <p>RDC6442, RDC6445 via UDP Réseau & USB</p>
+        </div>
+        <div class="hw-card">
+          <h4>Galvo Balor</h4>
+          <p>Lasers fibre et CO2 galvo haute vitesse</p>
+        </div>
+        <div class="hw-card">
+          <h4>Moshiboard & Newly</h4>
+          <p>Contrôleurs MoshiDraw & NewlyDraw</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quickstart -->
+    <section class="quickstart" id="quickstart">
+      <div class="section-title">
+        <h2>Installation Rapide</h2>
+        <p>Prêt en quelques secondes sous Windows, macOS ou Linux.</p>
+      </div>
+
+      <div class="code-box">
+        <span class="code-comment"># Cloner le dépôt GitHub</span><br>
+        git clone https://github.com/LordMadTrix/MadGravQt.git<br>
+        cd MadGravQt<br><br>
+        <span class="code-comment"># Installer les dépendances</span><br>
+        pip install -e .<br><br>
+        <span class="code-comment"># Lancer l'interface graphique Qt</span><br>
+        python run_qt.py
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer>
+    <p>&copy; 2026 MadGravQt. Logiciel Open-Source sous licence MIT. Développé avec passion pour la communauté Maker & Laser.</p>
+    <p style="margin-top: 8px;">Dépôt officiel : <a href="https://github.com/LordMadTrix/MadGravQt" target="_blank">github.com/LordMadTrix/MadGravQt</a></p>
+  </footer>
+
+  <script>
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+
+      event.target.classList.add('active');
+      document.getElementById('tab-' + tabName).classList.add('active');
+    }
+  </script>
+</body>
+</html>

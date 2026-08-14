@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 try:
-    from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer
+    from PyQt6.QtCore import QPoint, QPointF, QSettings, Qt, QTimer
     from PyQt6.QtGui import QAction, QColor, QWheelEvent
     from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import (
@@ -28,6 +28,8 @@ try:
         QMessageBox,
         QPushButton,
         QSpinBox,
+        QToolBar,
+        QToolButton,
     )
 
     HAS_QT = True
@@ -54,6 +56,17 @@ class TestQtMainWindow(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # QSettings("MadGrav", "QtGUI") writes to the REAL platform store
+        # (the Windows registry, HKEY_CURRENT_USER\Software\MadGrav\QtGUI)
+        # -- the SAME key the real installed app uses. A test that shows/
+        # hides docks and then closes the window (persisting window/state
+        # in closeEvent()) would otherwise leak into the next test run
+        # (confirmed: this broke test_arm_step_can_be_disabled_via_
+        # preference in isolation after an unrelated dock-visibility test
+        # ran first) and, worse, into the real user's actual saved layout.
+        # Clear before AND after every test so _restore_window_state()
+        # never reads stale state in, and no test leaves residue behind.
+        self._clear_persisted_window_state()
         self.kernel = bootstrap.bootstrap(plugins=[basedevice.plugin, cag.plugin])
         self.root = self.kernel.root
         self.root("service device start dummy 0\n")
@@ -84,8 +97,16 @@ class TestQtMainWindow(unittest.TestCase):
         QMessageBox.question = self._orig_question
         QMenu.exec = self._orig_menu_exec
         self.win._closing_from_kernel = True  # skip the unsaved-changes prompt
-        self.win.close()
+        self.win.close()  # closeEvent() persists window/state -- clear it again right after
+        self._clear_persisted_window_state()
         self.kernel()  # full (non-partial) call shuts the kernel down
+
+    @staticmethod
+    def _clear_persisted_window_state():
+        settings = QSettings("MadGrav", "QtGUI")
+        settings.remove("window/state")
+        settings.remove("window/geometry")
+        settings.sync()
 
     def _add_grbl_device(self, label="TestGRBL"):
         self.root(f'device add -i grbl-generic -l "{label}"\n')
@@ -440,6 +461,136 @@ class TestQtMainWindow(unittest.TestCase):
             "window open JobSpooler", self.win.console_output.toPlainText()
         )
 
+    # -- "Aligner, Booléens & Modifier" grid (dock_tools) -- this used to
+    # be a standalone QToolBar ("Édition & Alignement Vectoriel"). That
+    # went through two failed fix attempts before landing here: (1) its
+    # 20 QToolButtons were added via addWidget(), which Qt's native "..."
+    # overflow popup can't display (a widget can only be shown in one
+    # place at a time) -- entries past the visible cut rendered blank
+    # ("les 3 points ... rien a faire"); (2) converting to real QAction
+    # fixed the popup, but the toolbar still needed an overflow at all
+    # whenever it landed in a horizontal area, and a stale saved
+    # QSettings position kept restoring it to the top regardless of
+    # setAllowedAreas or an explicit post-restore re-pin ("je veux pas la
+    # barre ... en haut"). The actual fix: it was never a toolbar's job
+    # to hold 20 labeled buttons -- every other such group in this app
+    # (Générateurs/Traitements/Vision above) already lives as a wrapping
+    # QGridLayout inside the one scrollable dock_tools panel, which can
+    # never overflow. Moved here to match. -------------------------------
+
+    def test_align_grid_buttons_exist_in_dock_tools_not_a_separate_toolbar(self):
+        self.assertEqual(
+            [tb.windowTitle() for tb in self.win.findChildren(QToolBar)
+             if tb.windowTitle() == "Édition & Alignement Vectoriel"],
+            [],
+        )
+        expected_labels = {
+            "Gauche", "Centre H", "Droite", "Haut", "Centre V", "Bas",
+            "Centrer Table", "Unir", "Soustraire", "Intersecter", "Exclure",
+            "Miroir H", "Miroir V", "Pivot 90°", "Répartir H", "Répartir V",
+            "Égaliser L", "Égaliser H", "Contour", "Hachurage",
+        }
+        button_labels = {
+            btn.text() for btn in self.win.dock_tools.findChildren(QToolButton)
+        }
+        self.assertTrue(expected_labels.issubset(button_labels))
+
+    def test_align_grid_button_reaches_its_real_handler(self):
+        # "Unir" is wired via lambda: self._execute_cag("union") (a
+        # fresh self-lookup on every call) rather than a directly-bound
+        # method reference like most buttons in this grid -- only the
+        # lambda-wrapped style is interceptable by monkeypatching an
+        # instance attribute after construction, so it's the one this
+        # test can actually observe (same reasoning already established
+        # for the CAG entries when this lived in the toolbar).
+        union_btn = next(
+            btn for btn in self.win.dock_tools.findChildren(QToolButton)
+            if btn.text() == "Unir"
+        )
+        calls = []
+        original = self.win._execute_cag
+        try:
+            self.win._execute_cag = lambda op: calls.append(op)
+            QTest.mouseClick(union_btn, Qt.MouseButton.LeftButton)
+            self.assertEqual(calls, ["union"])
+        finally:
+            self.win._execute_cag = original
+
+    # -- Fenêtre menu -- every entry used to call "window open X" which is
+    # only ever registered by the wx GUI plugin (never loaded in this
+    # Qt-only build, see madgrav/gui/plugin.py's has_feature("wx") gate),
+    # so every click silently did nothing (user report: "dans le menu
+    # fenetre il y a rien qui marche"). _open_window_or_fallback() now
+    # routes to a real Qt handler where one exists, or an honest message
+    # otherwise, only using the console path if "window/X" is ever really
+    # registered (e.g. a future build with wx available). -------------------
+
+    def test_window_menu_routes_to_qt_handler_when_no_wx_window_registered(self):
+        self.assertEqual(list(self.root.match("window/Rotary")), [])
+        opened = []
+        with patch.object(
+            QDialog, "exec", lambda self_dlg: opened.append(type(self_dlg).__name__)
+        ):
+            self.win._open_window_or_fallback(
+                "Rotary", self.win._on_rotary_assistant_dialog, "Axe Rotatif..."
+            )
+
+        self.assertEqual(opened, ["RotaryAssistantDialog"])
+        self.assertNotIn("window open Rotary", self.win.console_output.toPlainText())
+
+    def test_window_menu_simulation_opens_real_gcode_preview_dialog(self):
+        opened = []
+        with patch.object(
+            QDialog, "exec", lambda self_dlg: opened.append(type(self_dlg).__name__)
+        ):
+            self.win._open_window_or_fallback(
+                "Simulation", self.win._on_gcode_simulation_dialog, "Simulation..."
+            )
+
+        self.assertEqual(opened, ["GCodePreviewDialog"])
+
+    def test_window_menu_properties_switches_ops_dock_to_transform_tab(self):
+        self.win.dock_ops.setVisible(False)
+        self.win.ops_tab_widget.setCurrentIndex(0)
+
+        self.win._open_window_or_fallback(
+            "Properties",
+            lambda: self.win._show_ops_dock_tab(2),
+            "Propriétés de l'Élément...",
+        )
+
+        self.assertTrue(self.win.dock_ops.isVisible())
+        self.assertEqual(self.win.ops_tab_widget.currentIndex(), 2)
+
+    def test_window_menu_shows_honest_fallback_when_no_qt_handler_exists(self):
+        # Preferences/Notes/Keymap/Wordlist have no Qt-native replacement
+        # yet -- must say so plainly rather than doing nothing.
+        self.assertEqual(list(self.root.match("window/Preferences")), [])
+        shown = []
+        QMessageBox.information = staticmethod(
+            lambda *a, **k: shown.append(a[2] if len(a) > 2 else k.get("text"))
+        )
+
+        self.win._open_window_or_fallback("Preferences", None, "Préférences...")
+
+        self.assertEqual(len(shown), 1)
+        self.assertIn("pas encore disponible", shown[0])
+
+    def test_window_menu_uses_console_path_when_wx_window_is_registered(self):
+        self.root.register("window/Preferences", object())
+        try:
+            shown = []
+            QMessageBox.information = staticmethod(lambda *a, **k: shown.append(1))
+
+            self.win._open_window_or_fallback("Preferences", None, "Préférences...")
+
+            self.assertEqual(shown, [])
+            self.assertIn(
+                "window open Preferences", self.win.console_output.toPlainText()
+            )
+        finally:
+            self.root.unregister("window/Preferences")
+
     # -- Job-progress time formatting ---------------------------------------
 
     def test_format_hms_formats_seconds_as_h_mm_ss(self):
@@ -511,6 +662,51 @@ class TestQtMainWindow(unittest.TestCase):
         self.win.act_redo.setEnabled(True)
         self.win.act_redo.trigger()
         self.assertIn("redo", self.win.console_output.toPlainText())
+
+    def test_frame_selection_is_undoable(self):
+        # "frame" (shapes.py) never calls elements.undoscope()/undo.mark()
+        # itself -- confirmed empirically (before this fix) that the
+        # created rect survived a Ctrl+Z. _on_frame_selection now wraps
+        # its console dispatch in elements.undoscope() itself.
+        elements = self.root.elements
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        elements.undo.mark("baseline")
+        r = list(elements.elems())[-1]
+        elements.set_emphasis([r])
+        self.kernel.process_queue()
+
+        count_before = len(list(elements.elems()))
+        QInputDialog.getDouble = staticmethod(lambda *a, **k: (0.0, True))
+        self.win._on_frame_selection()
+        self.kernel.process_queue()
+        self.assertGreater(len(list(elements.elems())), count_before)
+
+        self.win._on_undo()
+        self.kernel.process_queue()
+        self.assertEqual(len(list(elements.elems())), count_before, "undo must remove the frame rect it just created")
+
+    def test_box_generator_is_undoable(self):
+        # Same undoscope gap as frame, here in a PRE-EXISTING generator
+        # (not added this session) -- confirms the fix wasn't just for
+        # this session's own additions but the whole class of
+        # madgrav/tools/*.py generators, none of which call
+        # elements.undoscope()/undo.mark() on their own.
+        elements = self.root.elements
+        count_before = len(list(elements.elems()))
+
+        def fake_exec(dlg_self):
+            return QDialog.DialogCode.Accepted
+
+        QMessageBox.information = lambda *a, **kw: None
+        with patch.object(QDialog, "exec", fake_exec):
+            self.win._on_box_generator_dialog()
+        self.kernel.process_queue()
+        self.assertGreater(len(list(elements.elems())), count_before)
+
+        self.win._on_undo()
+        self.kernel.process_queue()
+        self.assertEqual(len(list(elements.elems())), count_before, "undo must remove the generated box panels")
 
     # -- Operations-tree refresh debounce (perf) ----------------------------
 
@@ -684,10 +880,13 @@ class TestQtMainWindow(unittest.TestCase):
     def test_window_menu_actions_pass_the_correct_distinct_name(self):
         # Same closure-capture pattern as align/geometry/recent-files
         # above -- the "Fenêtre" menu's window_entries loop connects each
-        # QAction with lambda checked=False, n=window_name: self.
-        # _open_window(n). window_menu itself is a local variable in
-        # _setup_ui, found here via the real menu bar rather than
-        # exposed as a self.* attribute.
+        # QAction with a lambda closing over (window_name, qt_handler,
+        # label) that calls self._open_window_or_fallback(n, h, lbl) --
+        # updated from the old self._open_window(n)-only call when that
+        # method grew a real-Qt-handler/fallback-message path (see
+        # _open_window_or_fallback). window_menu itself is a local
+        # variable in _setup_ui, found here via the real menu bar rather
+        # than exposed as a self.* attribute.
         window_menu = next(
             m
             for m in self.win.menuBar().findChildren(QMenu)
@@ -696,16 +895,16 @@ class TestQtMainWindow(unittest.TestCase):
         actions = [a for a in window_menu.actions() if not a.isSeparator()]
         self.assertGreater(len(actions), 5)
 
-        original = self.win._open_window
+        original = self.win._open_window_or_fallback
         try:
             calls = []
-            self.win._open_window = lambda n: calls.append(n)
+            self.win._open_window_or_fallback = lambda n, h, lbl: calls.append(n)
             for act in actions:
                 act.trigger()
             self.assertEqual(len(calls), len(actions))
             self.assertEqual(len(set(calls)), len(calls))  # every one distinct
         finally:
-            self.win._open_window = original
+            self.win._open_window_or_fallback = original
 
     def test_edit_menu_actions_reach_their_handlers_via_real_trigger(self):
         # act_delete/act_rotate_cw/act_rotate_ccw/act_mirror_h/
@@ -1223,6 +1422,76 @@ class TestQtMainWindow(unittest.TestCase):
 
         self.assertAlmostEqual(rect1.bounds[0], rect2.bounds[0], places=2)
 
+    def test_align_left_is_undoable(self):
+        # First attempt at this test held onto the ORIGINAL rect1/rect2
+        # object references across the undo call and read .bounds off
+        # them directly -- looked like a failure (bounds unchanged) but
+        # was actually a test bug: undo's backup_tree()/restore_tree()
+        # swap in freshly-copied node objects, so a reference held from
+        # before undo is a stale, orphaned object that was never touched
+        # by the restore at all. RectNode.__copy__ (elem_rect.py) already
+        # deep-copies .matrix correctly (confirmed by reading it) -- the
+        # bug was in this test's assumption, not in undo itself. Re-query
+        # the tree after undo instead of trusting old references, same
+        # discipline test_frame_selection_is_undoable already used (count
+        # via a fresh elements.elems() call, not a held reference).
+        elements = self.root.elements
+        self.root("rect 0mm 0mm 5mm 5mm\n")
+        self.root("rect 20mm 10mm 5mm 5mm\n")
+        self.kernel.process_queue()
+        rect1, rect2 = list(elements.elems())[-2:]
+        elements.set_emphasis([rect1, rect2])
+        self.kernel.process_queue()
+        elements.undo.mark("baseline")
+
+        x_before = rect2.bounds[0]
+        self.win._on_align_left()
+        self.kernel.process_queue()
+        self.assertAlmostEqual(rect2.bounds[0], rect1.bounds[0], places=2)
+
+        self.win._on_undo()
+        self.kernel.process_queue()
+        rect1, rect2 = list(elements.elems())[-2:]  # re-fetch: undo swaps in fresh node objects
+        self.assertAlmostEqual(rect2.bounds[0], x_before, places=2, msg="undo must restore rect2's pre-align position")
+
+        # Redo should re-apply the align -- same re-fetch discipline,
+        # closing the loop on undo/redo symmetry for this handler.
+        self.win._on_redo()
+        self.kernel.process_queue()
+        rect1, rect2 = list(elements.elems())[-2:]
+        self.assertAlmostEqual(rect2.bounds[0], rect1.bounds[0], places=2, msg="redo must re-apply the align")
+
+    def test_align_and_arrange_actions_show_status_message_when_selection_insufficient(self):
+        # These used to silently no-op below their minimum selection count
+        # (2 for align/match, 3 for distribute, 1 for center/mirror) --
+        # every OTHER tool in the app (hatch, offset, nesting, vectorize)
+        # already told the user why nothing happened, so these should too.
+        self.root.elements.set_emphasis(None)
+        self.kernel.process_queue()
+
+        checks = [
+            (self.win._on_align_left, "aligner"),
+            (self.win._on_align_center_h, "aligner"),
+            (self.win._on_align_right, "aligner"),
+            (self.win._on_align_top, "aligner"),
+            (self.win._on_align_center_v, "aligner"),
+            (self.win._on_align_bottom, "aligner"),
+            (self.win._on_center_to_bed, "centrer"),
+            (self.win._on_mirror_h, "retourner"),
+            (self.win._on_mirror_v, "retourner"),
+            (self.win._on_distribute_h, "répartir"),
+            (self.win._on_distribute_v, "répartir"),
+            (self.win._on_match_width, "sélectionnez"),
+            (self.win._on_match_height, "sélectionnez"),
+            (lambda: self.win._on_align("left"), "aligner"),
+            (lambda: self.win._on_geometry_op("union"), "sélectionnez"),
+        ]
+        for handler, expected_word in checks:
+            self.win.status_bar.clearMessage()
+            handler()
+            msg = self.win.status_bar.currentMessage().lower()
+            self.assertIn(expected_word, msg, f"{handler} gave no useful feedback for an empty selection")
+
     def test_geometry_union_merges_two_overlapping_elements(self):
         elements = self.root.elements
         self.root("rect 0mm 0mm 10mm 10mm\n")
@@ -1549,6 +1818,45 @@ class TestQtMainWindow(unittest.TestCase):
             canvas._handle_items, {}, "multi-selection must not show handles"
         )
 
+    def test_refresh_selection_highlight_only_restyles_the_changed_delta(self):
+        # refresh_selection_highlight() used to restyle every rendered
+        # item on every selection change; it now only touches the items
+        # whose emphasis flipped (tracked via _prev_emphasized_items).
+        # Correctness check: switching selection from A to B must still
+        # leave A looking unselected and B looking selected, and the
+        # cache must track exactly what's currently emphasized.
+        elements = self.root.elements
+        canvas = self.win.canvas
+
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.root("rect 20mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        canvas.render_elements()
+        node_a, node_b = list(elements.elems())[-2:]
+        item_a = next(i for i, n in canvas._item_to_node.items() if n is node_a)
+        item_b = next(i for i, n in canvas._item_to_node.items() if n is node_b)
+
+        elements.set_emphasis([node_a])
+        canvas.refresh_selection_highlight()
+        self.assertEqual(canvas._prev_emphasized_items, {item_a})
+        self.assertEqual(item_a.zValue(), 11)
+        self.assertEqual(item_b.zValue(), 10)
+
+        # Switch selection to B -- A must revert (it's in the delta as a
+        # "was emphasized, no longer is" item) and B must now highlight.
+        elements.set_emphasis([node_b])
+        canvas.refresh_selection_highlight()
+        self.assertEqual(canvas._prev_emphasized_items, {item_b})
+        self.assertEqual(item_a.zValue(), 10, "previously-selected item must revert")
+        self.assertEqual(item_b.zValue(), 11)
+
+        # Deselect entirely -- delta is just {item_b} (the "was" side).
+        elements.set_emphasis(None)
+        canvas.refresh_selection_highlight()
+        self.assertEqual(canvas._prev_emphasized_items, set())
+        self.assertEqual(item_a.zValue(), 10)
+        self.assertEqual(item_b.zValue(), 10)
+
     def test_dragging_a_corner_handle_resizes_the_element(self):
         from madgrav.core.units import UNITS_PER_MM
 
@@ -1645,7 +1953,27 @@ class TestQtMainWindow(unittest.TestCase):
         self.assertTrue(self.win._dark_theme)
         self.assertFalse(self.win.act_light_theme.isChecked())
 
-        dark_pixel = self.win.canvas.viewport().grab().toImage().pixelColor(2, 2)
+        # Not viewport (2, 2) -- that corner sits inside drawBackground()'s
+        # ruler-drawing zone (X-ruler ticks span scene y in [-22, 0],
+        # Y-ruler ticks/text span scene x in [-35, 0], both hugging the
+        # origin near the top-left corner), not the plain bed background.
+        # The ruler pen is deliberately INVERTED for contrast against its
+        # own theme (dark theme's #A0A0B0 pen is lighter than light
+        # theme's #505060 pen -- exactly backwards from the background
+        # trend this test checks), so a sample landing there fails this
+        # assertion regardless of whether the real background recolored
+        # correctly. Confirmed by hand: dark=160/light=80 red are exactly
+        # those two pens' red channels, not background fill colors.
+        # Whether (2, 2) actually lands in that zone depends on the
+        # canvas's exact pixel size at construction time (where the
+        # bed's 0,0 origin maps to in the viewport) -- fragile to any
+        # layout change elsewhere in the window, which is exactly what
+        # exposed this. Sampling well inside the viewport instead (offset
+        # from center, not dead-center, to dodge the bed-dimensions
+        # watermark text) is robust regardless of window/dock geometry.
+        viewport = self.win.canvas.viewport()
+        sample_point = (viewport.width() // 2 + 30, viewport.height() // 2 + 30)
+        dark_pixel = viewport.grab().toImage().pixelColor(*sample_point)
 
         self.win.act_light_theme.setChecked(True)
         self.win._on_toggle_theme()
@@ -1653,7 +1981,7 @@ class TestQtMainWindow(unittest.TestCase):
 
         self.assertFalse(self.win._dark_theme)
         self.assertFalse(self.root.qt_dark_theme)
-        light_pixel = self.win.canvas.viewport().grab().toImage().pixelColor(2, 2)
+        light_pixel = viewport.grab().toImage().pixelColor(*sample_point)
         self.assertNotEqual(light_pixel, dark_pixel)
         self.assertGreater(light_pixel.red(), dark_pixel.red())  # lighter
 
@@ -1942,6 +2270,54 @@ class TestQtMainWindow(unittest.TestCase):
         self.kernel.process_queue()
         self.app.processEvents()
         self.assertEqual(item.pos(), pos_before2)
+
+    def test_nudge_and_delete_work_with_a_fresh_multi_selection(self):
+        # Same first_emphasized-is-None bug as the qt_main.py handlers
+        # fixed earlier this session, here in the canvas' own arrow-key
+        # nudge and Delete key -- among the most common interactions in
+        # the app, and exactly the ones a rubber-band multi-select (no
+        # prior single click) would hit.
+        elements = self.root.elements
+        canvas = self.win.canvas
+        self.root("rect 0mm 0mm 5mm 5mm\n")
+        self.root("rect 20mm 0mm 5mm 5mm\n")
+        self.kernel.process_queue()
+        r1, r2 = list(elements.elems())[-2:]
+        canvas.render_elements()
+
+        elements.set_emphasis([r1, r2])
+        self.kernel.process_queue()
+        item1 = next(it for it, n in canvas._item_to_node.items() if n is r1)
+        pos_before = item1.pos()
+        canvas._nudge_emphasized(15, 0)
+        self.kernel.process_queue()
+        self.assertAlmostEqual(item1.pos().x() - pos_before.x(), 15, delta=0.01)
+
+        elements.set_emphasis([r1, r2])
+        self.kernel.process_queue()
+        count_before = len(list(elements.elems()))
+        canvas._delete_emphasized()
+        self.kernel.process_queue()
+        self.assertLess(len(list(elements.elems())), count_before)
+
+    def test_selection_label_shows_count_for_a_fresh_multi_selection(self):
+        # Same bug, in the status-bar selection label: node=None (the
+        # canvas' selection_changed signal payload) used to be checked
+        # BEFORE the real selected-count, showing "Aucune sélection" for
+        # a valid multi-selection just because no single element had been
+        # clicked first.
+        elements = self.root.elements
+        self.root("rect 0mm 0mm 5mm 5mm\n")
+        self.root("rect 20mm 0mm 5mm 5mm\n")
+        self.kernel.process_queue()
+        r1, r2 = list(elements.elems())[-2:]
+
+        elements.set_emphasis([r1, r2])
+        self.kernel.process_queue()
+        self.win._on_selection_changed(elements.first_emphasized)
+
+        self.assertNotIn("Aucune", self.win.selection_label.text())
+        self.assertIn("2", self.win.selection_label.text())
 
     def test_canvas_click_and_shift_click_select_toggle(self):
         # The most basic canvas interaction -- clicking an element to
@@ -2623,6 +2999,289 @@ class TestQtMainWindow(unittest.TestCase):
         elements.set_emphasis(None)
         self.win._on_bring_to_front()
         self.win._on_send_to_back()
+
+    def test_raise_and_lower_one_step_swap_adjacent_siblings(self):
+        # One-step version of bring-to-front/send-to-back above -- swaps
+        # a node with its immediate neighbor rather than moving it all
+        # the way to either end.
+        elements = self.root.elements
+        node_a = elements.elem_branch.add(
+            type="elem rect", x=0, y=0, width="5mm", height="5mm",
+            stroke=elements.default_stroke,
+        )
+        node_b = elements.elem_branch.add(
+            type="elem rect", x=10, y=0, width="5mm", height="5mm",
+            stroke=elements.default_stroke,
+        )
+        node_c = elements.elem_branch.add(
+            type="elem rect", x=20, y=0, width="5mm", height="5mm",
+            stroke=elements.default_stroke,
+        )
+        self.kernel.process_queue()
+
+        def order():
+            return [
+                n for n in elements.elem_branch.children
+                if n in (node_a, node_b, node_c)
+            ]
+
+        self.assertEqual(order(), [node_a, node_b, node_c])
+
+        # Raise the MIDDLE node -> swaps with its next neighbor (C).
+        elements.set_emphasis([node_b])
+        self.win._on_raise_one()
+        self.kernel.process_queue()
+        self.assertEqual(order(), [node_a, node_c, node_b])
+
+        # Lower it back down -> swaps with C again, restoring order.
+        elements.set_emphasis([node_b])
+        self.win._on_lower_one()
+        self.kernel.process_queue()
+        self.assertEqual(order(), [node_a, node_b, node_c])
+
+        # Already frontmost/backmost -- safe no-ops.
+        elements.set_emphasis([node_c])
+        self.win._on_raise_one()
+        self.assertEqual(order(), [node_a, node_b, node_c])
+
+        elements.set_emphasis([node_a])
+        self.win._on_lower_one()
+        self.assertEqual(order(), [node_a, node_b, node_c])
+
+        # No selection -- a safe no-op.
+        elements.set_emphasis(None)
+        self.win._on_raise_one()
+        self.win._on_lower_one()
+
+    def test_smart_vectorize_dialog_traces_and_positions_image(self):
+        # vectorize_bitmap_to_bezier() works in pixel space; the handler
+        # must scale+translate each new node's matrix onto the SOURCE
+        # image's own bed position/size, not leave it sitting at raw
+        # pixel coordinates near the origin.
+        from PIL import Image, ImageDraw
+        from madgrav.core.node.elem_image import ImageNode
+        from madgrav.core.units import UNITS_PER_MM
+        from madgrav.svgelements import Matrix
+
+        img = Image.new("L", (100, 50), 255)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((20, 10, 80, 40), fill=0)
+
+        target_x_mm, target_y_mm, target_w_mm, target_h_mm = 30.0, 40.0, 20.0, 10.0
+        matrix = Matrix.scale(
+            target_w_mm * UNITS_PER_MM / 100.0, target_h_mm * UNITS_PER_MM / 50.0
+        )
+        matrix.post_translate(target_x_mm * UNITS_PER_MM, target_y_mm * UNITS_PER_MM)
+        image_node = ImageNode(image=img, matrix=matrix)
+        self.root.elements.elem_branch.add_node(image_node)
+        self.root.elements.set_emphasis([image_node])
+        self.kernel.process_queue()
+
+        def fake_exec(dlg_self):
+            dlg_self.spin_threshold.setValue(128)
+            return QDialog.DialogCode.Accepted
+
+        # The closing QMessageBox.information(...) is itself a QDialog
+        # subclass, so patching QDialog.exec alone would route it through
+        # fake_exec too (which expects a spin_threshold that a message box
+        # doesn't have) -- patch it separately as a no-op, matching the
+        # setUp()-documented convention for this test file.
+        QMessageBox.information = lambda *a, **kw: None
+        with patch.object(QDialog, "exec", fake_exec):
+            self.win._on_smart_vectorize_dialog()
+        self.kernel.process_queue()
+
+        traced = [
+            n for n in self.root.elements.elem_branch.children
+            if getattr(n, "label", None) == "Trace Vectorielle"
+        ]
+        self.assertGreaterEqual(len(traced), 1)
+        bbox = traced[0].bounds
+        self.assertIsNotNone(bbox)
+        img_bounds_x0 = target_x_mm * UNITS_PER_MM
+        img_bounds_x1 = (target_x_mm + target_w_mm) * UNITS_PER_MM
+        img_bounds_y0 = target_y_mm * UNITS_PER_MM
+        img_bounds_y1 = (target_y_mm + target_h_mm) * UNITS_PER_MM
+        # The traced contour must land within (a small tolerance around)
+        # the image's own bed rectangle, not near the pixel-space origin.
+        self.assertGreaterEqual(bbox[0], img_bounds_x0 - 1.0)
+        self.assertLessEqual(bbox[2], img_bounds_x1 + 1.0)
+        self.assertGreaterEqual(bbox[1], img_bounds_y0 - 1.0)
+        self.assertLessEqual(bbox[3], img_bounds_y1 + 1.0)
+
+    def test_node_editor_dialog_handler_moves_a_node_and_updates_bounds(self):
+        # _on_node_editor_dialog wires NodeEditorDialog.on_changed to call
+        # path_node.altered() -- verify the document's own cached bounds
+        # (not just the dialog's own list) actually reflect a mutation
+        # made through the dialog, the same stale-cache class of bug as
+        # the array-generator fix earlier this session.
+        from madgrav.core.units import UNITS_PER_MM
+        from madgrav.svgelements import Path
+
+        path = Path()
+        path.move(complex(0, 0))
+        path.line(complex(50 * UNITS_PER_MM, 0))
+        path.line(complex(50 * UNITS_PER_MM, 50 * UNITS_PER_MM))
+        path.closed()
+        elements = self.root.elements
+        path_node = elements.elem_branch.add(type="elem path", path=path, stroke=elements.default_stroke)
+        path_node.altered()
+        original_bounds = path_node.bounds  # forces caching
+        elements.set_emphasis([path_node])
+        self.kernel.process_queue()
+
+        def fake_exec(dlg_self):
+            dlg_self.list_nodes.setCurrentRow(1)
+            dlg_self.spin_x.setValue(200.0)
+            dlg_self.spin_y.setValue(0.0)
+            dlg_self._on_move()
+            return QDialog.DialogCode.Accepted
+
+        with patch.object(QDialog, "exec", fake_exec):
+            self.win._on_node_editor_dialog()
+        self.kernel.process_queue()
+
+        new_bounds = path_node.bounds
+        self.assertNotEqual(new_bounds, original_bounds, "moving a node through the dialog must update the document's cached bounds")
+        self.assertGreater(new_bounds[2] - new_bounds[0], 199.0 * UNITS_PER_MM)
+
+    def test_galvo_hatch_dialog_handler_adds_hatch_pattern_for_selected_path(self):
+        from madgrav.core.units import UNITS_PER_MM
+        from madgrav.svgelements import Path
+
+        w = 40.0 * UNITS_PER_MM
+        path = Path()
+        path.move(complex(0, 0))
+        path.line(complex(w, 0))
+        path.line(complex(w, w))
+        path.line(complex(0, w))
+        path.closed()
+        elements = self.root.elements
+        path_node = elements.elem_branch.add(type="elem path", path=path, stroke=elements.default_stroke)
+        path_node.altered()
+        elements.set_emphasis([path_node])
+        self.kernel.process_queue()
+        count_before = len(list(elements.elems()))
+
+        def fake_exec(dlg_self):
+            dlg_self.combo_mode.setCurrentText("cross")
+            dlg_self.spin_angle.setValue(30.0)
+            dlg_self.spin_spacing.setValue(2.0)
+            return QDialog.DialogCode.Accepted
+
+        with patch.object(QDialog, "exec", fake_exec):
+            self.win._on_galvo_hatch_dialog()
+        self.kernel.process_queue()
+
+        hatched = [
+            n for n in elements.elem_branch.children
+            if getattr(n, "label", None) == "Hachurage Galvo"
+        ]
+        self.assertEqual(len(hatched), 1)
+        self.assertEqual(len(list(elements.elems())), count_before + 1)
+        hbbox = hatched[0].bounds
+        self.assertIsNotNone(hbbox)
+        self.assertGreater(hbbox[2] - hbbox[0], 1.0)
+        self.assertGreater(hbbox[3] - hbbox[1], 1.0)
+
+    def test_core_editing_actions_work_with_a_fresh_multi_selection(self):
+        # Same bug class as frame/nesting above, batch-fixed across every
+        # handler in this file that used elements.first_emphasized is
+        # None as a plain "anything selected?" gate -- representative
+        # spot check on two of them (lock, duplicate) with a FRESH
+        # multi-selection (no prior single-click), the exact scenario
+        # that used to collapse first_emphasized to None and silently
+        # no-op the whole action.
+        elements = self.root.elements
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.root("rect 20mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        r1, r2 = list(elements.elems())[-2:]
+
+        elements.set_emphasis([r1, r2])
+        self.kernel.process_queue()
+        self.win._on_lock(True)
+        self.assertTrue(r1.lock)
+        self.assertTrue(r2.lock)
+
+        elements.set_emphasis([r1, r2])
+        self.kernel.process_queue()
+        count_before = len(list(elements.elems()))
+        self.win._on_duplicate()
+        self.kernel.process_queue()
+        self.assertGreater(len(list(elements.elems())), count_before)
+
+    def test_frame_selection_draws_a_rect_around_the_bounding_box(self):
+        # "frame" is a pre-existing kernel console command (shapes.py)
+        # that draws a real rect around the selection's bounding box --
+        # never wired to the Qt UI before. No selection must give clear
+        # feedback (status bar), not a silent no-op.
+        elements = self.root.elements
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.root("rect 30mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        r1, r2 = list(elements.elems())[-2:]
+
+        elements.set_emphasis(None)
+        self.kernel.process_queue()
+        self.win._on_frame_selection()
+        self.assertIn("sélectionner", self.win.status_bar.currentMessage().lower())
+
+        elements.set_emphasis([r1, r2])
+        self.kernel.process_queue()
+        count_before = len(list(elements.elems()))
+        QInputDialog.getDouble = staticmethod(lambda *a, **k: (5.0, True))
+        self.win._on_frame_selection()
+        self.kernel.process_queue()
+
+        framed = [n for n in elements.elem_branch.children if str(getattr(n, "label", "")).startswith("Frame around")]
+        self.assertEqual(len(framed), 1, f"console_output: {self.win.console_output.toPlainText()!r}")
+        self.assertEqual(len(list(elements.elems())), count_before + 1)
+        fbbox = framed[0].bounds
+        self.assertIsNotNone(fbbox)
+        # 5mm margin on both sides of a combined 0..40mm-wide selection.
+        from madgrav.core.units import UNITS_PER_MM
+        self.assertLess(fbbox[0], -1.0 * UNITS_PER_MM)
+        self.assertGreater(fbbox[2], 41.0 * UNITS_PER_MM)
+
+        # A cancelled dialog (ok=False) must not add a frame.
+        QInputDialog.getDouble = staticmethod(lambda *a, **k: (5.0, False))
+        count_before2 = len(list(elements.elems()))
+        self.win._on_frame_selection()
+        self.assertEqual(len(list(elements.elems())), count_before2)
+
+    def test_nesting_dialog_handler_works_with_a_fresh_multi_selection(self):
+        # Same class of bug as frame selection above: nest_elements is
+        # fundamentally a multi-shape operation, but the handler used to
+        # gate on elements.first_emphasized is None -- which is also None
+        # right after a single set_emphasis([a, b, ...]) call with no
+        # prior single-element selection (confirmed: this is exactly the
+        # "no sense in a 'first' when all are equal" case in elements.py).
+        # A freshly-drawn rubber-band multi-select hits this path.
+        elements = self.root.elements
+        self.root("rect 0mm 0mm 10mm 10mm\n")
+        self.root("rect 20mm 0mm 10mm 10mm\n")
+        self.kernel.process_queue()
+        r1, r2 = list(elements.elems())[-2:]
+
+        elements.set_emphasis([r1, r2])
+        self.kernel.process_queue()
+
+        def fake_exec(dlg_self):
+            dlg_self.spin_sheet_w.setValue(300.0)
+            dlg_self.spin_sheet_h.setValue(200.0)
+            dlg_self.spin_margin.setValue(2.0)
+            return QDialog.DialogCode.Accepted
+
+        # The closing QMessageBox.information(...) is itself a QDialog
+        # subclass -- same reasoning as test_smart_vectorize_dialog_
+        # traces_and_positions_image, patch it as a no-op separately.
+        QMessageBox.information = lambda *a, **kw: None
+        with patch.object(QDialog, "exec", fake_exec):
+            self.win._on_nesting_dialog()
+        self.kernel.process_queue()
+
+        self.assertNotIn("sélectionner", self.win.status_bar.currentMessage().lower())
 
     # -- Load file over an already-rendered document ---------------------
 
@@ -4394,11 +5053,29 @@ class TestQtMainWindow(unittest.TestCase):
                 panels_menu = menu_action.menu()
                 break
         self.assertIsNotNone(panels_menu)
-        entry_texts = {a.text() for a in panels_menu.actions()}
+        entry_texts = {a.text() for a in panels_menu.actions() if not a.isSeparator()}
         self.assertEqual(
             entry_texts,
-            {"Outils Laser & Dessin", "Inspecteur & Contrôle", "Console de Commandes"},
+            {
+                "Outils Laser & Dessin", "Inspecteur & Contrôle", "Console de Commandes",
+                "🔄 Réinitialiser la Disposition des Panneaux",
+            },
         )
+
+    def test_reset_panel_layout_restores_the_default_hidden_state(self):
+        # A user who drags/resizes docks into a confusing state needs a
+        # way back to the known-good just-constructed layout -- same
+        # "Reset Layout" convenience every professional app offers.
+        self.win.dock_ops.toggleViewAction().trigger()
+        self.win.dock_tools.toggleViewAction().trigger()
+        self.assertTrue(self.win.dock_ops.isVisible())
+        self.assertTrue(self.win.dock_tools.isVisible())
+
+        self.win._on_reset_panel_layout()
+        self.app.processEvents()
+
+        self.assertFalse(self.win.dock_ops.isVisible(), "reset must restore the default hidden state")
+        self.assertFalse(self.win.dock_tools.isVisible())
 
     # -- Keyboard shortcuts dialog -------------------------------------------
 

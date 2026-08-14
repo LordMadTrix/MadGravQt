@@ -32,10 +32,17 @@ def estimate_job_cost(
 
     bounds = None
 
-    for node in elements_service.elem_branch.flat(types="elem path"):
-        if hasattr(node, "path") and node.path is not None:
+    for node in elements_service.elems(types="elem path"):
+        node_path = getattr(node, "path", None)
+        if node_path is None and hasattr(node, "as_geometry"):
+            try:
+                node_path = node.as_geometry().as_path()
+            except Exception:
+                node_path = None
+
+        if node_path is not None:
             # Length in mm
-            path_len_mm = float(node.path.length() / UNITS_PER_MM)
+            path_len_mm = float(node_path.length() / UNITS_PER_MM)
             total_cut_len_mm += path_len_mm
 
             # Find matching operation speed
@@ -59,7 +66,7 @@ def estimate_job_cost(
                     bounds[2] = max(bounds[2], b[2])
                     bounds[3] = max(bounds[3], b[3])
 
-    for node in elements_service.elem_branch.flat(types="elem image"):
+    for node in elements_service.elems(types="elem image"):
         b = node.bounds
         if b is not None:
             w_mm = (b[2] - b[0]) / UNITS_PER_MM

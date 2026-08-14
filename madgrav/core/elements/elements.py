@@ -2531,7 +2531,10 @@ class Elemental(Service):
         # Fallback to traversal for complex requests
         # If caller provided explicit 'types' in kwargs, forward it directly to the branch
         if "types" in kwargs:
-            yield from elements.flat(**kwargs)
+            if elements is not None:
+                yield from elements.flat(**kwargs)
+            else:
+                yield from self.flat(**kwargs)
         else:
             yield from self.flat(types=elem_nodes, **kwargs)
 
