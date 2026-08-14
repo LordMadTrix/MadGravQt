@@ -1477,10 +1477,15 @@ class MadGravQtMainWindow(QMainWindow):
         gen_grid.setVerticalSpacing(2)
         laser_gens = [
             ("📦", "Boîte", "Boîte 3D -- Générer une boîte 3D dépliée à encoches (finger joints)", self._on_box_generator_dialog),
+            ("🔩", "T-Slot", "Boîte T-Slot -- Boîte démontable à écrous captifs (M3, M4, M5)", self._on_tslot_box_dialog),
+            ("🧩", "Inlay", "Inlay & Marqueterie -- Compensation kerf mâle/femelle et jeu mécanique", self._on_inlay_wizard_dialog),
             ("⚙️", "Engren.", "Engrenage -- Générer un engrenage droit à évolvente personnalisable", self._on_gear_generator_dialog),
             ("🧩", "Puzzle", "Puzzle -- Générer un puzzle vectoriel emboîtable", self._on_jigsaw_generator_dialog),
             ("🔲", "QR Code", "QR Code -- Générer un QR Code ou code-barres vectoriel", self._on_qr_code_dialog),
             ("🪵", "Charn.", "Charnières Vivantes -- Motif de flex cut pour plier bois/acrylique", self._on_living_hinges_dialog),
+            ("🗺️", "Topo 3D", "Cartes Topo 3D -- Découpe multi-strates avec lignes de niveau", self._on_topo_map_dialog),
+            ("🌸", "Mandala", "Mandala & Rosaces -- Motifs géométriques radiaux", self._on_mandala_generator_dialog),
+            ("🖼️", "Halftone", "Studio Gravure Photo -- Dithering & Demi-teintes", self._on_halftone_studio_dialog),
         ]
         for i, (emoji, label, tip, handler) in enumerate(laser_gens):
             btn = QToolButton(self)
@@ -1506,18 +1511,13 @@ class MadGravQtMainWindow(QMainWindow):
         laser_grid.setVerticalSpacing(2)
         laser_tools = [
             ("📊", "Test Mat.", "Test Matériau -- Matrice de test de vitesse et puissance", self._on_material_test_dialog),
-            # "▦" (not "🔲", already used by QR Code above) -- two
-            # different tools sharing one emoji was confirmed reusing
-            # the exact same glyph for unrelated actions, undermining
-            # the whole point of an icon being explicit.
+            ("🎯", "Matrice+", "Matrice Matériaux Pro -- Grille automatique Vitesse vs Puissance", self._on_material_matrix_test_dialog),
             ("▦", "Grille 2D", "Grille 2D -- Dupliquer les objets en grille répétitive", self._on_grid_array_dialog),
             ("⭕", "Circul.", "Réseau Circulaire -- Dupliquer les objets en couronne polaire", self._on_circular_array_dialog),
             ("🌉", "Tabs", "Micro-Tabs -- Ajouter des micro-ponts de maintien sur les contours", self._on_micro_tabs_dialog),
             ("✂️", "Kerf", "Kerf & Amorces -- Compensation du faisceau laser et amorces d'entrée", self._on_kerf_lead_dialog),
             ("🔤", "Tampon 3D", "Tampon 3D -- Épaulements 45° pour gravure de tampons en caoutchouc", self._on_stamp_mode_dialog),
             ("🔧", "Encoches", "Encoches -- Ajuster automatiquement l'épaisseur des fentes", self._on_slot_fitter_dialog),
-            # "🔢" (not "🔄", already used by Axe Rotatif below) -- same
-            # duplicate-glyph issue as Grille 2D above.
             ("🔢", "Ordre", "Ordre Découpe -- Optimiser l'ordre découpe (trous intérieurs en premier)", self._on_optimize_cut_order),
             ("✏️", "Vector.", "Vectorisation -- Tracer une image bitmap sélectionnée en contours vectoriels", self._on_smart_vectorize_dialog),
             ("🏔️", "Relief 3D", "Relief 3D -- Aperçu de la carte de puissance variable pour gravure en relief", self._on_relief_3d_dialog),
@@ -1548,16 +1548,21 @@ class MadGravQtMainWindow(QMainWindow):
         prod_grid.setHorizontalSpacing(1)
         prod_grid.setVerticalSpacing(2)
         prod_tools = [
-            ("🏷️", "Texte", "Texte Variable -- Sérialisation et texte dynamique CSV", self._on_variable_text_dialog),
-            ("📍", "Print", "Print & Cut -- Repérage et alignement 2-points sur imprimé", self._on_print_and_cut_dialog),
+            ("🔍", "Chutes", "Scrap Finder -- Détecter automatiquement les chutes de matière libres", self._on_scrap_finder_dialog),
+            ("📍", "Print", "Print & Cut -- Repérage et alignement sur repères fiduciels", self._on_print_and_cut_dialog),
+            ("🏷️", "Texte", "Texte Variable -- Sérialisation et texte dynamique CSV/Excel", self._on_variable_text_dialog),
             ("📷", "Caméra", "Caméra -- Calibration optique et homographie ArUco", self._on_camera_autocal_dialog),
             ("📏", "Mesure", "Mesure mm -- Mesurer les dimensions réelles des objets par caméra", self._on_measure_objects_dialog),
             ("📚", "Matér.", "Matériaux -- Bibliothèque de préréglages laser (Bois, Acrylique, etc.)", self._on_material_library_dialog),
             ("🔄", "Rotatif", "Axe Rotatif -- Assistant de calcul pas/mm pour objets cylindriques", self._on_rotary_assistant_dialog),
             ("💶", "Coût", "Estimateur Coût -- Calculateur de temps et coût de production", self._on_cost_estimator_dialog),
             ("🧮", "Imbric.", "Imbrication (Nesting) -- Réarranger les pièces sélectionnées sur une plaque", self._on_nesting_dialog),
+            ("🧩", "Nesting+", "True-Shape Nesting -- Imbrication 2D multi-rotations optimisée", self._on_trueshape_nesting_dialog),
+            ("⏱️", "Timeline", "Timeline & Accélération -- Simulation temporelle trapézoïdale", self._on_laser_timeline_dialog),
+            ("🖥️", "Kiosque", "Mode Atelier Tactile -- Plein écran opérateur simplifié (F11)", self._on_workshop_kiosk_dialog),
+            ("📱", "Remote", "Télécommande Web Mobile -- Piloter le laser depuis smartphone", self._on_web_remote_qr_dialog),
             ("🧾", "Devis", "Devis Client -- Calculer un devis détaillé matière/machine/marge", self._on_job_quote_dialog),
-            ("🏭", "Prod.", "File de Production -- Gestionnaire de file et mode kiosque atelier", self._on_production_queue_dialog),
+            ("🏭", "Prod.", "File de Production -- Gestionnaire de file d'attente multi-machines", self._on_production_queue_dialog),
             ("🎯", "M-Tête", "Calibration Multi-Tête -- Assistant d'alignement laser double-tête", self._on_multi_head_wizard_dialog),
             ("🧊", "Sim G-Code", "Simulation G-Code -- Trajectoire 3D et estimation de durée", self._on_gcode_simulation_dialog),
         ]
