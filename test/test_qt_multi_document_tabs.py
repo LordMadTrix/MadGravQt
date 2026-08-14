@@ -2,6 +2,7 @@ import unittest
 import os
 import sys
 
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from test import bootstrap
 from madgrav.device import basedevice
 from madgrav.extra import cag

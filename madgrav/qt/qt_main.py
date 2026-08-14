@@ -555,8 +555,6 @@ class MadGravQtMainWindow(QMainWindow):
         self.doc_tabs.setTabsClosable(True)
         self.doc_tabs.setMovable(True)
         self.doc_tabs.setDocumentMode(True)
-        self.doc_tabs.tabCloseRequested.connect(self.close_document_tab)
-        self.doc_tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.doc_tabs)
 
         # Initial Document Tab
@@ -564,55 +562,25 @@ class MadGravQtMainWindow(QMainWindow):
         self.doc_tabs.addTab(initial_doc, "Sans Titre")
         self.canvas = initial_doc.canvas
 
-    def create_new_document(self, title: str = "Sans Titre", file_path: str = None) -> DocumentTab:
-        doc = DocumentTab(self, title=title, file_path=file_path)
-        index = self.doc_tabs.addTab(doc, title)
-        self.doc_tabs.setCurrentIndex(index)
-        return doc
-
-    def current_document(self) -> DocumentTab:
-        widget = self.doc_tabs.currentWidget()
-        if isinstance(widget, DocumentTab):
-            return widget
-        return None
-
-    def close_document_tab(self, index: int):
-        if self.doc_tabs.count() <= 1:
-            doc = self.current_document()
-            if doc:
-                doc.set_file_path(None)
-                doc.set_modified(False)
-                self.doc_tabs.setTabText(0, "Sans Titre")
-            return
-        widget = self.doc_tabs.widget(index)
-        if widget:
-            self.doc_tabs.removeTab(index)
-            widget.deleteLater()
-
-    def _on_tab_changed(self, index: int):
-        doc = self.current_document()
-        if doc and doc.canvas:
-            self.canvas = doc.canvas
-
-        # Menu Bar
+        # Menu Bar (Created ONCE)
         self._create_menubar()
 
-        # Top Action Toolbar
+        # Top Action Toolbar (Created ONCE)
         self._create_toolbar()
 
-        # Left Tool Palette
+        # Left Tool Palette (Created ONCE)
         self._create_left_tool_panel()
 
-        # Right Dock Inspector (Operations, Elements, Laser Control)
+        # Right Dock Inspector (Operations, Elements, Laser Control) (Created ONCE)
         self._create_right_docks()
 
-        # Bottom Console Dock
+        # Bottom Console Dock (Created ONCE)
         self._create_console_dock()
 
-        # Bottom Layer Color Swatch Palette Bar
+        # Bottom Layer Color Swatch Palette Bar (Created ONCE)
         self._create_layer_palette_bar()
 
-        # Status Bar
+        # Status Bar (Created ONCE)
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
 
@@ -651,13 +619,55 @@ class MadGravQtMainWindow(QMainWindow):
 
         self.status_bar.showMessage("Prêt - MadGrav PyQt6 Initialisé", 5000)
 
-        # Connect signals
-        self.canvas.cursor_position_changed.connect(self._on_canvas_cursor_moved)
-        self.canvas.selection_changed.connect(self._on_selection_changed)
-        self.canvas.shape_created.connect(self._on_shape_created)
-        self.canvas.zoom_changed.connect(self._on_zoom_changed)
-        self.canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.canvas.customContextMenuRequested.connect(self._on_canvas_context_menu)
+        # Connect canvas signals
+        self._connect_canvas_signals(self.canvas)
+
+        # Connect tab signals AFTER full UI is initialized
+        self.doc_tabs.tabCloseRequested.connect(self.close_document_tab)
+        self.doc_tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _connect_canvas_signals(self, canvas):
+        canvas.cursor_position_changed.connect(self._on_canvas_cursor_moved)
+        canvas.selection_changed.connect(self._on_selection_changed)
+        canvas.shape_created.connect(self._on_shape_created)
+        canvas.zoom_changed.connect(self._on_zoom_changed)
+        canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        canvas.customContextMenuRequested.connect(self._on_canvas_context_menu)
+
+    def create_new_document(self, title: str = "Sans Titre", file_path: str = None) -> DocumentTab:
+        doc = DocumentTab(self, title=title, file_path=file_path)
+        index = self.doc_tabs.addTab(doc, title)
+        self.doc_tabs.setCurrentIndex(index)
+        self._connect_canvas_signals(doc.canvas)
+        return doc
+
+    def current_document(self) -> DocumentTab:
+        widget = self.doc_tabs.currentWidget()
+        if isinstance(widget, DocumentTab):
+            return widget
+        return None
+
+    def close_document_tab(self, index: int):
+        if self.doc_tabs.count() <= 1:
+            doc = self.current_document()
+            if doc:
+                doc.set_file_path(None)
+                doc.set_modified(False)
+                self.doc_tabs.setTabText(0, "Sans Titre")
+            return
+        widget = self.doc_tabs.widget(index)
+        if widget:
+            self.doc_tabs.removeTab(index)
+            widget.deleteLater()
+
+    def _on_tab_changed(self, index: int):
+        doc = self.current_document()
+        if doc and doc.canvas:
+            self.canvas = doc.canvas
+            self._update_window_title()
+            self._update_selection_dependent_actions()
+            self._update_position_panel()
+            self._refresh_operations_tree()
 
     def _create_menubar(self):
         menubar = self.menuBar()
