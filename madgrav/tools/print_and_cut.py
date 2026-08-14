@@ -71,3 +71,46 @@ def apply_transform_point(
     ny = s * (pt[0] * sin_t + pt[1] * cos_t) + ty
 
     return (round(nx, 4), round(ny, 4))
+
+
+def compute_print_and_cut_transform(
+    p1_design: Tuple[float, float],
+    p1_real: Tuple[float, float],
+    p2_design: Tuple[float, float],
+    p2_real: Tuple[float, float],
+):
+    """Calculate affine transform Matrix for Print & Cut alignment."""
+    from madgrav.svgelements import Matrix
+    # Design vector
+    dx_d = p2_design[0] - p1_design[0]
+    dy_d = p2_design[1] - p1_design[1]
+    len_d = math.hypot(dx_d, dy_d) or 1.0
+
+    # Real vector
+    dx_r = p2_real[0] - p1_real[0]
+    dy_r = p2_real[1] - p1_real[1]
+    len_r = math.hypot(dx_r, dy_r) or 1.0
+
+    scale = len_r / len_d
+    ang_d = math.atan2(dy_d, dx_d)
+    ang_r = math.atan2(dy_r, dx_r)
+    rot = ang_r - ang_d
+
+    # Matrix: Translate(-p1_d) -> Scale(s) -> Rotate(rot) -> Translate(p1_r)
+    M = Matrix()
+    M.post_translate(-p1_design[0], -p1_design[1])
+    M.post_scale(scale, scale)
+    M.post_rotate(rot)
+    M.post_translate(p1_real[0], p1_real[1])
+
+    return M
+
+
+def apply_print_and_cut_alignment(elements, matrix):
+    """Apply transform matrix to all selected elements."""
+    for node in elements.elems(emphasized=True):
+        if hasattr(node, "matrix"):
+            node.matrix *= matrix
+            node.altered()
+    elements.signal("refresh_scene", "Scene")
+

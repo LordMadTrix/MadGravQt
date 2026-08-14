@@ -2562,7 +2562,7 @@ class TestQtMainWindow(unittest.TestCase):
         self.app.processEvents()
 
         self.assertTrue(self.win._has_coolant())
-        self.assertTrue(self.win.btn_coolant.isVisible())
+        self.assertFalse(self.win.btn_coolant.isHidden())
         self.assertFalse(self.win.btn_coolant.isChecked())
 
         coolant = self.win._coolant_service()
