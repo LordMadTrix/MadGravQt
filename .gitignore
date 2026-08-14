@@ -4,6 +4,15 @@ __pycache__/
 *$py.class
 Madgrav.exe
 
+# Internal & Private IDE files
+.agents/
+.superpowers/
+CLAUDE.md
+.vscode/
+.idea/
+lancer.bat
+
+
 # C extensions
 *.so
 

@@ -1,12 +1,7 @@
 #!/usr/bin/env python
-"""Thin launcher for the wx-free MadGrav Qt6 shell.
+"""Thin launcher for the modern MadGrav Qt6 shell.
 
-Reuses the madgrav backend package installed editable from D:\\meerk40t
-(same kernel, device drivers, geometry engine) -- see madgrav.py in that
-repo for the original equivalent. wxPython is intentionally not
-installed in this project's .venv, so madgrav/gui/plugin.py's own
-ImportError handling disables the entire wx subsystem with no source
-changes needed; -Z is passed as well as a belt-and-suspenders flag.
+Starts the MadGrav Qt application with native Qt6 graphical interface.
 """
 
 import re
